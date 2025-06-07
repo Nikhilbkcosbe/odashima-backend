@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>アカウント作成のご案内</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f4f4f4;
+        margin: 0;
+        padding: 0;
+      }
+      .container {
+        max-width: 600px;
+        margin: auto;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+      .header {
+        padding: 32px 0;
+        border-bottom: 1px solid #e1e3e7;
+        width: 100%;
+        text-align: center;
+      }
+      .header img {
+        max-width: 80px;
+      }
+      .content {
+        padding-bottom: 2rem;
+        border-bottom: 1px solid #e1e3e7;
+        margin-bottom: 1rem;
+        color: #0f1d28;
+      }
+      .content h2 {
+        color: #0f1d28;
+      }
+      .content p {
+        color: #0f1d28;
+      }
+      .content h1 {
+        text-align: center;
+        letter-spacing: 0.5;
+      }
+      .footer {
+        color: #545f77;
+        font-size: 12px;
+        text-align: center;
+        margin-bottom: 32px;
+      }
+      .footer img {
+        max-width: 100%;
+      }
+      .verification-link {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 5px;
+        margin: 20px 0;
+        word-break: break-all;
+      }
+      .verification-link a {
+        color: indigo;
+        text-decoration: none;
+      }
+      .verification-link a:hover {
+        text-decoration: underline;
+      }
+      .expiration-notice {
+        background-color: #fff3cd;
+        padding: 10px;
+        border-radius: 4px;
+        margin: 10px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <a href="https://cosbe.inc/" title="logo" target="_blank">
+          <img
+            src="https://res.cloudinary.com/dwg22vc1v/image/upload/v1709869954/bn6z82jk0uxgxqsxurmv.png"
+            title="logo"
+            alt="logo"
+          />
+        </a>
+      </div>
+      <div class="content">
+        <h2>アカウント作成のご案内</h2>
+        <p>こんにちは、</p>
+        <p>タスク管理システムへのアカウント作成のご案内です。</p>
+        <div class="verification-link">
+          <p>
+            以下のリンクをクリックして、アカウントの設定を完了してください：
+          </p>
+          <a href="{{setup_link}}">{{setup_link}}</a>
+        </div>
+        <div class="expiration-notice">
+          <p>
+            このリンクは{{link_expiration_value}}
+            {{link_expiration_format}}間のみ有効です。
+          </p>
+          <p>
+            有効期限が切れた場合は、再度アカウント作成のリクエストを行ってください。
+          </p>
+        </div>
+        <p>このメールに心当たりがない場合は、無視していただいて構いません。</p>
+      </div>
+      <div class="footer">
+        <p>このメールは日本製鉄堺ブレイザーズから送信されています。</p>
+        <img
+          src="https://res.cloudinary.com/dwg22vc1v/image/upload/v1709869954/bn6z82jk0uxgxqsxurmv.png"
+          alt="Image Description"
+        />
+      </div>
+    </div>
+  </body>
+</html>
