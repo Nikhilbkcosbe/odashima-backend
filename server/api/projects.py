@@ -39,7 +39,6 @@ async def create_project(project_data: ProjectInputDataModel, current_user: str 
         HTTPException: If the user is not authorized or an error occurs during the process.
     """
     try:
-
         # Create a new project document
         new_project = {
             "_id": str(uuid.uuid4()),
