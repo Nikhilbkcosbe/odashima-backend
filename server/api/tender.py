@@ -1,5 +1,5 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from typing import List
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from typing import List, Optional
 import tempfile
 import os
 import gc
@@ -26,15 +26,27 @@ async def test_endpoint():
 @router.post("/compare", response_model=ComparisonSummary)
 async def compare_tender_files(
     pdf_file: UploadFile = File(...),
-    excel_file: UploadFile = File(...)
+    excel_file: UploadFile = File(...),
+    start_page: Optional[int] = Form(None),
+    end_page: Optional[int] = Form(None),
+    sheet_name: Optional[str] = Form(None)
 ) -> ComparisonSummary:
     """
     Compare a tender PDF with an Excel proposal iteratively.
     Focus on finding mismatches and items present in PDF but not in Excel.
+
+    Args:
+        pdf_file: PDF tender document
+        excel_file: Excel proposal document
+        start_page: Starting page number for PDF extraction (optional)
+        end_page: Ending page number for PDF extraction (optional)
+        sheet_name: Specific Excel sheet name to extract from (optional)
     """
     logger.info("=== STARTING TENDER COMPARISON ===")
     logger.info(f"PDF file: {pdf_file.filename}")
     logger.info(f"Excel file: {excel_file.filename}")
+    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
 
     # Validate file types
     if not pdf_file.filename.lower().endswith('.pdf'):
@@ -43,6 +55,15 @@ async def compare_tender_files(
     if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
         logger.error(f"Invalid Excel file: {excel_file.filename}")
         raise HTTPException(status_code=400, detail="Excel file required")
+
+    # Validate page range
+    if start_page is not None and start_page < 1:
+        raise HTTPException(status_code=400, detail="Start page must be >= 1")
+    if end_page is not None and end_page < 1:
+        raise HTTPException(status_code=400, detail="End page must be >= 1")
+    if start_page is not None and end_page is not None and start_page > end_page:
+        raise HTTPException(
+            status_code=400, detail="Start page cannot be greater than end page")
 
     # For PDF, we still need a temporary file (pdfplumber requires file path)
     # For Excel, we can use in-memory processing
@@ -71,19 +92,20 @@ async def compare_tender_files(
         excel_buffer = BytesIO(excel_content)
 
         logger.info("=== STARTING EXTRACTION PROCESS ===")
-        # Parse files iteratively
+        # Parse files iteratively with parameters
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
-        # Extract items page by page from PDF
-        logger.info(
-            "Extracting items from PDF (page by page, table by table)...")
-        pdf_items = pdf_parser.extract_tables(pdf_path)
+        # Extract items from PDF with page range
+        logger.info("Extracting items from PDF with specified parameters...")
+        pdf_items = pdf_parser.extract_tables_with_range(
+            pdf_path, start_page, end_page)
         logger.info(f"Total PDF items extracted: {len(pdf_items)}")
 
-        # Extract items sheet by sheet from Excel
-        logger.info("Extracting items from Excel (sheet by sheet)...")
-        excel_items = excel_parser.extract_items_from_buffer(excel_buffer)
+        # Extract items from Excel with sheet filter
+        logger.info("Extracting items from Excel with specified parameters...")
+        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+            excel_buffer, sheet_name)
         logger.info(f"Total Excel items extracted: {len(excel_items)}")
 
         # Close Excel buffer
@@ -154,19 +176,40 @@ async def compare_tender_files(
 @router.post("/compare-missing-only")
 async def compare_tender_files_missing_only(
     pdf_file: UploadFile = File(...),
-    excel_file: UploadFile = File(...)
+    excel_file: UploadFile = File(...),
+    start_page: Optional[int] = Form(None),
+    end_page: Optional[int] = Form(None),
+    sheet_name: Optional[str] = Form(None)
 ):
     """
     Compare tender files and return only the missing items (PDF items not in Excel).
     Optimized endpoint for specific use case.
+
+    Args:
+        pdf_file: PDF tender document
+        excel_file: Excel proposal document
+        start_page: Starting page number for PDF extraction (optional)
+        end_page: Ending page number for PDF extraction (optional)
+        sheet_name: Specific Excel sheet name to extract from (optional)
     """
     logger.info("=== STARTING MISSING ITEMS COMPARISON ===")
+    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
 
     # Same file processing as main endpoint
     if not pdf_file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="PDF file required")
     if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Excel file required")
+
+    # Validate page range
+    if start_page is not None and start_page < 1:
+        raise HTTPException(status_code=400, detail="Start page must be >= 1")
+    if end_page is not None and end_page < 1:
+        raise HTTPException(status_code=400, detail="End page must be >= 1")
+    if start_page is not None and end_page is not None and start_page > end_page:
+        raise HTTPException(
+            status_code=400, detail="Start page cannot be greater than end page")
 
     pdf_fd = None
     pdf_path = None
@@ -183,12 +226,14 @@ async def compare_tender_files_missing_only(
         excel_content = await excel_file.read()
         excel_buffer = BytesIO(excel_content)
 
-        # Parse files
+        # Parse files with parameters
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
-        pdf_items = pdf_parser.extract_tables(pdf_path)
-        excel_items = excel_parser.extract_items_from_buffer(excel_buffer)
+        pdf_items = pdf_parser.extract_tables_with_range(
+            pdf_path, start_page, end_page)
+        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+            excel_buffer, sheet_name)
         excel_buffer.close()
 
         # Get only missing items
@@ -207,6 +252,24 @@ async def compare_tender_files_missing_only(
                     "quantity": item.quantity
                 }
                 for item in missing_items
+            ],
+            "pdf_extracted_items": [
+                {
+                    "item_key": item.item_key,
+                    "raw_fields": item.raw_fields,
+                    "quantity": item.quantity,
+                    "source": item.source
+                }
+                for item in pdf_items
+            ],
+            "excel_extracted_items": [
+                {
+                    "item_key": item.item_key,
+                    "raw_fields": item.raw_fields,
+                    "quantity": item.quantity,
+                    "source": item.source
+                }
+                for item in excel_items
             ]
         }
 
@@ -236,19 +299,40 @@ async def compare_tender_files_missing_only(
 @router.post("/compare-mismatches-only")
 async def compare_tender_files_mismatches_only(
     pdf_file: UploadFile = File(...),
-    excel_file: UploadFile = File(...)
+    excel_file: UploadFile = File(...),
+    start_page: Optional[int] = Form(None),
+    end_page: Optional[int] = Form(None),
+    sheet_name: Optional[str] = Form(None)
 ):
     """
     Compare tender files and return only the quantity mismatches.
     Optimized endpoint for specific use case.
+
+    Args:
+        pdf_file: PDF tender document
+        excel_file: Excel proposal document
+        start_page: Starting page number for PDF extraction (optional)
+        end_page: Ending page number for PDF extraction (optional)
+        sheet_name: Specific Excel sheet name to extract from (optional)
     """
     logger.info("=== STARTING QUANTITY MISMATCHES COMPARISON ===")
+    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
 
     # Same file processing as main endpoint
     if not pdf_file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="PDF file required")
     if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Excel file required")
+
+    # Validate page range
+    if start_page is not None and start_page < 1:
+        raise HTTPException(status_code=400, detail="Start page must be >= 1")
+    if end_page is not None and end_page < 1:
+        raise HTTPException(status_code=400, detail="End page must be >= 1")
+    if start_page is not None and end_page is not None and start_page > end_page:
+        raise HTTPException(
+            status_code=400, detail="Start page cannot be greater than end page")
 
     pdf_fd = None
     pdf_path = None
@@ -265,12 +349,14 @@ async def compare_tender_files_mismatches_only(
         excel_content = await excel_file.read()
         excel_buffer = BytesIO(excel_content)
 
-        # Parse files
+        # Parse files with parameters
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
-        pdf_items = pdf_parser.extract_tables(pdf_path)
-        excel_items = excel_parser.extract_items_from_buffer(excel_buffer)
+        pdf_items = pdf_parser.extract_tables_with_range(
+            pdf_path, start_page, end_page)
+        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+            excel_buffer, sheet_name)
         excel_buffer.close()
 
         # Get only mismatched items
@@ -299,6 +385,24 @@ async def compare_tender_files_mismatches_only(
                     "match_confidence": result.match_confidence
                 }
                 for result in mismatched_results
+            ],
+            "pdf_extracted_items": [
+                {
+                    "item_key": item.item_key,
+                    "raw_fields": item.raw_fields,
+                    "quantity": item.quantity,
+                    "source": item.source
+                }
+                for item in pdf_items
+            ],
+            "excel_extracted_items": [
+                {
+                    "item_key": item.item_key,
+                    "raw_fields": item.raw_fields,
+                    "quantity": item.quantity,
+                    "source": item.source
+                }
+                for item in excel_items
             ]
         }
 

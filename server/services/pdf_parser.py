@@ -40,17 +40,45 @@ class PDFParser:
         """
         Extract tables from PDF iteratively, page by page and table by table.
         """
+        return self.extract_tables_with_range(pdf_path, None, None)
+    
+    def extract_tables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None) -> List[TenderItem]:
+        """
+        Extract tables from PDF iteratively with specified page range.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            start_page: Starting page number (1-based, None means start from page 1)
+            end_page: Ending page number (1-based, None means extract all pages)
+        """
         all_items = []
         
         logger.info(f"Starting PDF extraction from: {pdf_path}")
+        logger.info(f"Page range: {start_page or 'start'} to {end_page or 'end'}")
         
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 total_pages = len(pdf.pages)
-                logger.info(f"PDF has {total_pages} pages to process")
+                logger.info(f"PDF has {total_pages} pages total")
                 
-                # Process each page iteratively
-                for page_num, page in enumerate(pdf.pages):
+                # Determine actual page range
+                actual_start = (start_page - 1) if start_page is not None else 0
+                actual_end = (end_page - 1) if end_page is not None else total_pages - 1
+                
+                # Validate page range
+                actual_start = max(0, actual_start)
+                actual_end = min(total_pages - 1, actual_end)
+                
+                if actual_start > actual_end:
+                    logger.warning(f"Invalid page range: start={actual_start+1}, end={actual_end+1}")
+                    return all_items
+                
+                pages_to_process = actual_end - actual_start + 1
+                logger.info(f"Processing pages {actual_start + 1} to {actual_end + 1} ({pages_to_process} pages)")
+                
+                # Process specified page range iteratively
+                for page_num in range(actual_start, actual_end + 1):
+                    page = pdf.pages[page_num]
                     logger.info(f"Processing page {page_num + 1}/{total_pages}")
                     
                     page_items = self._extract_tables_from_page(page, page_num)
@@ -60,7 +88,7 @@ class PDFParser:
                     # Join items from this page to the total collection
                     all_items.extend(page_items)
                     
-                logger.info(f"Total items extracted from PDF: {len(all_items)}")
+                logger.info(f"Total items extracted from PDF (pages {actual_start + 1}-{actual_end + 1}): {len(all_items)}")
                 
         except Exception as e:
             logger.error(f"Error processing PDF: {e}")

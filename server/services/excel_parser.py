@@ -28,38 +28,67 @@ class ExcelParser:
         """
         Extract items from Excel buffer iteratively, sheet by sheet.
         """
+        return self.extract_items_from_buffer_with_sheet(excel_buffer, None)
+
+    def extract_items_from_buffer_with_sheet(self, excel_buffer: BytesIO, sheet_name: Optional[str] = None) -> List[TenderItem]:
+        """
+        Extract items from Excel buffer with optional sheet filtering.
+
+        Args:
+            excel_buffer: BytesIO buffer containing Excel data
+            sheet_name: Specific sheet name to extract from (None means all sheets)
+        """
         all_items = []
         excel_file = None
 
         logger.info("Starting Excel extraction from buffer")
+        logger.info(f"Target sheet: {sheet_name or 'All sheets'}")
 
         try:
             # Read from buffer
             excel_file = pd.ExcelFile(excel_buffer)
-            total_sheets = len(excel_file.sheet_names)
-            logger.info(
-                f"Excel file has {total_sheets} sheets to process: {excel_file.sheet_names}")
 
-            # Process each sheet iteratively
-            for sheet_idx, sheet_name in enumerate(excel_file.sheet_names):
+            # Filter sheets based on sheet_name parameter
+            if sheet_name:
+                # Extract from specific sheet
+                if sheet_name in excel_file.sheet_names:
+                    target_sheets = [sheet_name]
+                    logger.info(f"Found target sheet: '{sheet_name}'")
+                else:
+                    logger.error(
+                        f"Sheet '{sheet_name}' not found. Available sheets: {excel_file.sheet_names}")
+                    raise ValueError(
+                        f"Sheet '{sheet_name}' not found in Excel file. Available sheets: {excel_file.sheet_names}")
+            else:
+                # Extract from all sheets
+                target_sheets = excel_file.sheet_names
+
+            total_sheets = len(target_sheets)
+            logger.info(
+                f"Excel file has {len(excel_file.sheet_names)} total sheets, processing {total_sheets} sheets: {target_sheets}")
+
+            # Process target sheets iteratively
+            for sheet_idx, current_sheet_name in enumerate(target_sheets):
                 logger.info(
-                    f"Processing sheet {sheet_idx + 1}/{total_sheets}: '{sheet_name}'")
+                    f"Processing sheet {sheet_idx + 1}/{total_sheets}: '{current_sheet_name}'")
 
                 try:
                     sheet_items = self._process_single_sheet(
-                        excel_file, sheet_name, sheet_idx)
+                        excel_file, current_sheet_name, sheet_idx)
 
                     logger.info(
-                        f"Extracted {len(sheet_items)} items from sheet '{sheet_name}'")
+                        f"Extracted {len(sheet_items)} items from sheet '{current_sheet_name}'")
 
                     # Join items from this sheet to the total collection
                     all_items.extend(sheet_items)
 
                 except Exception as e:
-                    logger.error(f"Error processing sheet '{sheet_name}': {e}")
+                    logger.error(
+                        f"Error processing sheet '{current_sheet_name}': {e}")
                     continue
 
-            logger.info(f"Total items extracted from Excel: {len(all_items)}")
+            logger.info(
+                f"Total items extracted from Excel ({len(target_sheets)} sheets): {len(all_items)}")
 
         except Exception as e:
             logger.error(f"Error reading Excel buffer: {e}")
@@ -360,17 +389,17 @@ class ExcelParser:
             "規格",
             "摘要"
         ]
-        
+
         # Use the first available field as the key
         for field in key_fields:
             if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
                 return raw_fields[field].strip()
-        
+
         # If no primary fields available, create a simple key from available data
         for field_name, field_value in raw_fields.items():
             if field_value and field_value.strip() and field_name not in ["単位", "数量", "単価", "金額"]:
                 return field_value.strip()
-        
+
         # Return empty string if no meaningful key can be created
         return ""
 
