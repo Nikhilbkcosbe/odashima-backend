@@ -285,8 +285,10 @@ class ExcelParser:
                                           sheet_name: str, sheet_idx: int, row_idx: int,
                                           existing_items: List) -> Union[TenderItem, str, None]:
         """
-        Process a single data row with row spanning logic.
-        Returns: TenderItem, "merged", "skipped", or None
+        Enhanced row spanning logic to handle:
+        - Row 1: Has item name but no quantity (or quantity = 0)
+        - Row 2: Has quantity and unit but no item name -> Combine into single item
+        - Row 2: Has item name AND quantity/unit -> Concatenate names and combine
         """
         # First check if row is completely empty
         if self._is_completely_empty_row(row):
@@ -305,27 +307,153 @@ class ExcelParser:
                     else:
                         raw_fields[col_name] = cell_value
 
-        # Check for quantity-only row (row spanning case)
-        if self._is_quantity_only_row(raw_fields, quantity):
-            return self._merge_quantity_with_previous_item(existing_items, quantity)
+        # Check what type of data this row contains
+        has_item_fields = self._has_item_identifying_fields(raw_fields)
+        has_quantity_data = quantity > 0 or "単位" in raw_fields
+        
+        logger.debug(f"Excel Row {row_idx}: has_item_fields={has_item_fields}, has_quantity_data={has_quantity_data}, quantity={quantity}")
+        
+        # Case 1: Row has item fields but no quantity data (incomplete item - needs spanning)
+        if has_item_fields and not has_quantity_data:
+            logger.debug(f"Excel Row {row_idx}: Creating incomplete item (name only) - expecting quantity in next row")
+            item_key = self._create_item_key_from_fields(raw_fields)
+            if not item_key:
+                return "skipped"
+            
+            return TenderItem(
+                item_key=item_key,
+                raw_fields=raw_fields,
+                quantity=0.0,  # Will be updated when quantity row is found
+                source="Excel"
+            )
+        
+        # Case 2: Row has quantity data but no item fields (completion row for spanning)
+        elif has_quantity_data and not has_item_fields:
+            logger.debug(f"Excel Row {row_idx}: Found completion row with quantity data only")
+            return self._complete_previous_item_with_quantity_data(existing_items, raw_fields, quantity)
+        
+        # Case 3: Row has both item fields and quantity data
+        elif has_item_fields and has_quantity_data:
+            # Check if previous item exists and needs completion (quantity = 0)
+            if existing_items and existing_items[-1].quantity == 0:
+                logger.debug(f"Excel Row {row_idx}: Found item with name+quantity, combining with previous incomplete item")
+                return self._combine_items_with_name_concatenation(existing_items, raw_fields, quantity)
+            else:
+                logger.debug(f"Excel Row {row_idx}: Creating complete standalone item")
+                item_key = self._create_item_key_from_fields(raw_fields)
+                if not item_key:
+                    return "skipped"
+                
+                return TenderItem(
+                    item_key=item_key,
+                    raw_fields=raw_fields,
+                    quantity=quantity,
+                    source="Excel"
+                )
+        
+        # Case 4: Row has neither meaningful item fields nor quantity data
+        else:
+            logger.debug(f"Excel Row {row_idx}: Skipping - no meaningful data")
+            return "skipped"
+    
+    def _combine_items_with_name_concatenation(self, existing_items: List[TenderItem], 
+                                             raw_fields: Dict[str, str], quantity: float) -> str:
+        """
+        Combine the previous incomplete item with current item by concatenating their names.
+        """
+        if not existing_items:
+            logger.warning("Excel: Found item for concatenation but no previous item to combine with")
+            return "skipped"
+        
+        last_item = existing_items[-1]
+        
+        # Check if the last item needs completion (has quantity = 0)
+        if last_item.quantity > 0:
+            logger.warning(f"Excel: Previous item '{last_item.item_key}' already has quantity {last_item.quantity}")
+            return "skipped"
+        
+        # Get current item name from this row
+        current_item_key = self._create_item_key_from_fields(raw_fields)
+        if not current_item_key:
+            logger.warning("Excel: Cannot create item key from current row for concatenation")
+            return "skipped"
+        
+        # Concatenate item names: previous_name + current_name
+        old_item_key = last_item.item_key
+        concatenated_key = f"{old_item_key} + {current_item_key}"
+        
+        # Update the last item
+        last_item.item_key = concatenated_key
+        last_item.quantity = quantity
+        
+        # Merge all fields from both rows, prioritizing new row for duplicates
+        for field_name, field_value in raw_fields.items():
+            if field_name not in last_item.raw_fields or not last_item.raw_fields[field_name]:
+                last_item.raw_fields[field_name] = field_value
+                logger.debug(f"Excel: Added field '{field_name}' = '{field_value}' to combined item")
+            else:
+                # For existing fields, combine them if different
+                existing_value = last_item.raw_fields[field_name]
+                if existing_value != field_value:
+                    last_item.raw_fields[field_name] = f"{existing_value} + {field_value}"
+                    logger.debug(f"Excel: Combined field '{field_name}' = '{existing_value} + {field_value}'")
+        
+        logger.info(f"Excel row spanning with name concatenation: '{old_item_key}' + '{current_item_key}' = '{concatenated_key}' with quantity {quantity}")
+        
+        return "merged"
 
-        # Skip if no meaningful fields extracted (empty row)
-        if not raw_fields:
+    def _has_item_identifying_fields(self, raw_fields: Dict[str, str]) -> bool:
+        """
+        Check if the row contains fields that identify an item (name, classification, specification).
+        """
+        identifying_fields = [
+            "工事区分・工種・種別・細別",
+            "規格",
+            "摘要"
+        ]
+
+        for field in identifying_fields:
+            if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
+                return True
+
+        return False
+
+    def _complete_previous_item_with_quantity_data(self, existing_items: List[TenderItem],
+                                                   raw_fields: Dict[str, str], quantity: float) -> str:
+        """
+        Complete the previous incomplete item with quantity and unit data.
+        """
+        if not existing_items:
+            logger.warning(
+                "Excel: Found quantity completion row but no previous item to complete")
             return "skipped"
 
-        # Create simple item key
-        item_key = self._create_item_key_from_fields(raw_fields)
+        last_item = existing_items[-1]
 
-        # Skip if we couldn't create a meaningful key
-        if not item_key:
+        # Check if the last item needs completion (has quantity = 0)
+        if last_item.quantity > 0:
+            logger.warning(
+                f"Excel: Previous item '{last_item.item_key}' already has quantity {last_item.quantity}")
             return "skipped"
 
-        return TenderItem(
-            item_key=item_key,
-            raw_fields=raw_fields,
-            quantity=quantity,
-            source="Excel"
-        )
+        # Update the last item with quantity and any additional fields
+        old_quantity = last_item.quantity
+        last_item.quantity = quantity
+
+        # Merge additional fields (like unit) from the completion row
+        for field_name, field_value in raw_fields.items():
+            if field_name not in last_item.raw_fields or not last_item.raw_fields[field_name]:
+                last_item.raw_fields[field_name] = field_value
+                logger.debug(
+                    f"Excel: Added field '{field_name}' = '{field_value}' to item '{last_item.item_key}'")
+
+        logger.info(
+            f"Excel row spanning completed: '{last_item.item_key}' quantity {old_quantity} -> {quantity}")
+        if "単位" in raw_fields:
+            logger.info(
+                f"Excel row spanning: Added unit '{raw_fields['単位']}' to '{last_item.item_key}'")
+
+        return "merged"
 
     def _is_completely_empty_row(self, row: pd.Series) -> bool:
         """
@@ -341,7 +469,7 @@ class ExcelParser:
 
     def _is_quantity_only_row(self, raw_fields: Dict[str, str], quantity: float) -> bool:
         """
-        Check if this row only contains quantity data (indicating row spanning).
+        Enhanced check for quantity-only rows (indicating row spanning).
         """
         # Must have quantity but no other meaningful fields
         if quantity <= 0:
@@ -353,19 +481,25 @@ class ExcelParser:
             if field_value and field_value.strip():
                 meaningful_fields += 1
 
-        # If we have quantity but no other fields, it's likely a spanned row
-        return meaningful_fields == 0
+        # If we have quantity but no other fields, it's a spanned row
+        is_quantity_only = meaningful_fields == 0
+
+        if is_quantity_only:
+            logger.debug(
+                f"Excel: Detected quantity-only row: quantity={quantity}, fields={meaningful_fields}")
+
+        return is_quantity_only
 
     def _merge_quantity_with_previous_item(self, existing_items: List[TenderItem], quantity: float) -> str:
         """
-        Merge quantity with the most recent item (row spanning logic).
+        Enhanced quantity merging with better error handling and logging.
         """
         if not existing_items:
             logger.warning(
-                "Quantity-only row found but no previous item to merge with")
+                "Excel: Quantity-only row found but no previous item to merge with")
             return "skipped"
 
-        # Add quantity to the last item
+        # Get the last item for merging
         last_item = existing_items[-1]
         old_quantity = last_item.quantity
         new_quantity = old_quantity + quantity
@@ -374,7 +508,7 @@ class ExcelParser:
         last_item.quantity = new_quantity
 
         logger.info(
-            f"Merged quantity in Excel: {last_item.item_key} - {old_quantity} + {quantity} = {new_quantity}")
+            f"Excel row spanning merge: '{last_item.item_key}' quantity {old_quantity} + {quantity} = {new_quantity}")
 
         return "merged"
 
