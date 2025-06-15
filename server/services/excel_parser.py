@@ -12,17 +12,15 @@ logger = logging.getLogger(__name__)
 
 class ExcelParser:
     def __init__(self):
-        # Flexible column patterns for Japanese construction documents
+        # Updated column patterns to match the PDF parser structure
         self.column_patterns = {
-            "工種": ["工種", "工 種", "費目", "工事区分"],
-            "種別": ["種別", "種 別"],
-            "細別": ["細別", "細 別"],
-            "規格": ["規格", "規 格"],
-            "名称": ["名称", "名 称", "項目", "品名"],
+            "工事区分・工種・種別・細別": ["工事区分・工種・種別・細別", "工事区分", "工種", "種別", "細別", "費目"],
+            "規格": ["規格", "規 格", "名称・規格", "名称", "項目", "品名"],
             "単位": ["単位", "単 位"],
             "数量": ["数量", "数 量"],
             "単価": ["単価", "単 価"],
             "金額": ["金額", "金 額"],
+            "数量・金額増減": ["数量・金額増減", "増減", "変更"],
             "摘要": ["摘要", "備考", "摘 要"]
         }
 
@@ -286,7 +284,7 @@ class ExcelParser:
         if not raw_fields:
             return "skipped"
 
-        # Create hierarchical item key
+        # Create simple item key
         item_key = self._create_item_key_from_fields(raw_fields)
 
         # Skip if we couldn't create a meaningful key
@@ -353,25 +351,26 @@ class ExcelParser:
 
     def _create_item_key_from_fields(self, raw_fields: Dict[str, str]) -> str:
         """
-        Create a hierarchical item key from available fields, but only if meaningful data exists.
+        Create a simple item key from available fields - each row treated independently.
+        No hierarchical concatenation, just use the main identifying field.
         """
-        key_parts = []
-
-        # Build key from hierarchical fields in order of priority
-        for field in ["工種", "種別", "細別", "名称", "規格"]:
-            if field in raw_fields and raw_fields[field]:
-                key_parts.append(raw_fields[field])
-
-        # If no hierarchical fields, try to create key from available data (except quantity-related)
-        if not key_parts:
-            for field_name, field_value in raw_fields.items():
-                if field_value and field_name not in ["単位", "数量", "単価", "金額", "摘要"]:
-                    key_parts.append(field_value)
-
-        # Only return a key if we have meaningful content
-        if key_parts:
-            return "|".join(key_parts)
-
+        # Priority order for creating item key (use first available field)
+        key_fields = [
+            "工事区分・工種・種別・細別",
+            "規格",
+            "摘要"
+        ]
+        
+        # Use the first available field as the key
+        for field in key_fields:
+            if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
+                return raw_fields[field].strip()
+        
+        # If no primary fields available, create a simple key from available data
+        for field_name, field_value in raw_fields.items():
+            if field_value and field_value.strip() and field_name not in ["単位", "数量", "単価", "金額"]:
+                return field_value.strip()
+        
         # Return empty string if no meaningful key can be created
         return ""
 
@@ -521,20 +520,8 @@ class ExcelParser:
             if "数量" in col_mapping:
                 quantity = self._extract_quantity(row.iloc[col_mapping["数量"]])
 
-            # Create item key from hierarchical fields
-            key_parts = []
-            for field in ["工種", "種別", "細別", "名称", "規格"]:
-                if field in raw_fields and raw_fields[field]:
-                    key_parts.append(raw_fields[field])
-
-            # If no hierarchical fields, try to create key from available data
-            if not key_parts:
-                for field_name, field_value in raw_fields.items():
-                    if field_value and field_name not in ["単位", "数量", "単価", "金額", "摘要"]:
-                        key_parts.append(field_value)
-
-            item_key = "|".join(
-                key_parts) if key_parts else f"{sheet_name}_row_{row_idx}"
+            # Create item key from simple fields
+            item_key = self._create_item_key_from_fields(raw_fields)
 
             items.append(TenderItem(
                 item_key=item_key,

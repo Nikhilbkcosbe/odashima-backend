@@ -12,17 +12,16 @@ logger = logging.getLogger(__name__)
 
 class PDFParser:
     def __init__(self):
-        # More flexible column patterns for Japanese construction documents
+        # Updated column patterns to match the specific PDF structure
         self.column_patterns = {
-            "名称・規格": ["名称・規格", "名称", "規格", "項目", "品名"],
+            "工事区分・工種・種別・細別": ["工事区分・工種・種別・細別", "工事区分", "工種", "種別", "細別", "費目"],
+            "規格": ["規格", "規 格", "名称・規格", "名称", "項目", "品名"],
             "単位": ["単位", "単 位"],
             "数量": ["数量", "数 量"],
-            "摘要": ["摘要", "備考", "摘 要"],
-            "工種": ["工種", "工 種", "費目", "工事区分"],
-            "種別": ["種別", "種 別"],
-            "細別": ["細別", "細 別"],
             "単価": ["単価", "単 価"],
-            "金額": ["金額", "金 額"]
+            "金額": ["金額", "金 額"],
+            "数量・金額増減": ["数量・金額増減", "増減", "変更"],
+            "摘要": ["摘要", "備考", "摘 要"]
         }
         self._setup_tesseract()
 
@@ -249,24 +248,25 @@ class PDFParser:
     
     def _create_item_key_from_fields(self, raw_fields: Dict[str, str]) -> str:
         """
-        Create a hierarchical item key from available fields, but only if meaningful data exists.
+        Create a simple item key from available fields - each row treated independently.
+        No hierarchical concatenation, just use the main identifying field.
         """
-        key_parts = []
+        # Priority order for creating item key (use first available field)
+        key_fields = [
+            "工事区分・工種・種別・細別",
+            "規格",
+            "摘要"
+        ]
         
-        # Build key from hierarchical fields in order of priority
-        for field in ["工種", "種別", "細別", "名称・規格"]:
-            if field in raw_fields and raw_fields[field]:
-                key_parts.append(raw_fields[field])
+        # Use the first available field as the key
+        for field in key_fields:
+            if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
+                return raw_fields[field].strip()
         
-        # If no hierarchical fields, use other available fields (except quantity-related)
-        if not key_parts:
-            for field_name, field_value in raw_fields.items():
-                if field_value and field_name not in ["単位", "数量", "単価", "金額"]:
-                    key_parts.append(field_value)
-        
-        # Only return a key if we have meaningful content
-        if key_parts:
-            return "|".join(key_parts)
+        # If no primary fields available, create a simple key from available data
+        for field_name, field_value in raw_fields.items():
+            if field_value and field_value.strip() and field_name not in ["単位", "数量", "単価", "金額"]:
+                return field_value.strip()
         
         # Return empty string if no meaningful key can be created
         return ""
@@ -286,10 +286,23 @@ class PDFParser:
     def _get_column_mapping(self, header_row: List) -> Dict[str, int]:
         """
         Map column names to indices based on header row.
+        Updated to handle the specific 8-column structure.
         """
         col_indices = {}
         
-        for col_name in ["名称・規格", "単位", "数量", "摘要", "工種", "種別", "細別"]:
+        # Check for all column types in the specific order
+        column_names = [
+            "工事区分・工種・種別・細別",
+            "規格", 
+            "単位", 
+            "数量", 
+            "単価", 
+            "金額", 
+            "数量・金額増減", 
+            "摘要"
+        ]
+        
+        for col_name in column_names:
             idx = self._find_column_index(header_row, col_name)
             if idx != -1:
                 col_indices[col_name] = idx
