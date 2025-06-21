@@ -130,7 +130,6 @@ class OAuth2PasswordBearerWithCookie(OAuth2):
                             # Security Level 2(If decryption fail because of cookie tamper, then it's unauthorized)
                             plainText = unpad(cipher.decrypt(
                                 bytes.fromhex(csrf_cookie)))
-                            print("plainText--->",plainText)
 
                             try:
                                 # Security Level 3(If JWT token failed decode inside the decrypted text,then it's

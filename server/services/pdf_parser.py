@@ -23,18 +23,6 @@ class PDFParser:
             "数量・金額増減": ["数量・金額増減", "増減", "変更"],
             "摘要": ["摘要", "備考", "摘 要"]
         }
-        self._setup_tesseract()
-
-    def _setup_tesseract(self):
-        """
-        Setup Tesseract environment variables for Lambda.
-        """
-        # Check if we're running in Lambda
-        if os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
-            # Lambda layer paths
-            os.environ['LD_LIBRARY_PATH'] = '/opt/lib:' + \
-                os.environ.get('LD_LIBRARY_PATH', '')
-            os.environ['TESSDATA_PREFIX'] = '/opt/tessdata'
 
     def extract_tables(self, pdf_path: str) -> List[TenderItem]:
         """
