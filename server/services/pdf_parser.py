@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 class PDFParser:
     def __init__(self):
         # Updated column patterns to match the specific PDF structure
-        self.column_patterns = {
-            "工事区分・工種・種別・細別": ["工事区分・工種・種別・細別", "工事区分", "工種", "種別", "細別", "費目"],
+        self.default_column_patterns = {
+            "工事区分・工種・種別・細別": ["費 目 ・ 工 種 ・ 種 別 ・ 細 目", "費目・工種・種別・細別・規格", "工事区分・工種・種別・細別", "工事区分", "工種", "種別", "細別", "費目"],
             "規格": ["規格", "規 格", "名称・規格", "名称", "項目", "品名"],
             "単位": ["単位", "単 位"],
             "数量": ["数量", "数 量"],
@@ -23,14 +23,36 @@ class PDFParser:
             "数量・金額増減": ["数量・金額増減", "増減", "変更"],
             "摘要": ["摘要", "備考", "摘 要"]
         }
+        self.column_patterns = self.default_column_patterns.copy()
+        self.custom_item_name_column = None
+
+    def set_custom_item_name_column(self, custom_column_name: Optional[str]):
+        """
+        Set a custom column name for item identification and update patterns accordingly.
+
+        Args:
+            custom_column_name: The custom column name to use for item identification
+        """
+        if custom_column_name:
+            self.custom_item_name_column = custom_column_name
+            # Create updated patterns with the custom column name as the primary item identifier
+            self.column_patterns = self.default_column_patterns.copy()
+            self.column_patterns["工事区分・工種・種別・細別"] = [
+                custom_column_name] + self.default_column_patterns["工事区分・工種・種別・細別"]
+            logger.info(
+                f"PDF Parser: Set custom item name column to '{custom_column_name}'")
+        else:
+            self.custom_item_name_column = None
+            self.column_patterns = self.default_column_patterns.copy()
+            logger.info("PDF Parser: Using default column patterns")
 
     def extract_tables(self, pdf_path: str) -> List[TenderItem]:
         """
         Extract tables from PDF iteratively, page by page and table by table.
         """
-        return self.extract_tables_with_range(pdf_path, None, None)
+        return self.extract_tables_with_range(pdf_path, None, None, None)
 
-    def extract_tables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None) -> List[TenderItem]:
+    def extract_tables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None, item_name_column: Optional[str] = None) -> List[TenderItem]:
         """
         Extract tables from PDF iteratively with specified page range.
 
@@ -38,7 +60,11 @@ class PDFParser:
             pdf_path: Path to the PDF file
             start_page: Starting page number (1-based, None means start from page 1)
             end_page: Ending page number (1-based, None means extract all pages)
+            item_name_column: Custom column name to use for item identification (optional)
         """
+        # Set custom item name column if provided
+        self.set_custom_item_name_column(item_name_column)
+
         all_items = []
 
         logger.info(f"Starting PDF extraction from: {pdf_path}")
@@ -126,6 +152,54 @@ class PDFParser:
 
         return page_items
 
+    def _should_process_table(self, table: List[List], page_num: int, table_num: int) -> bool:
+        """
+        Check if a table should be processed based on custom column requirements.
+        Enhanced to use flexible pattern matching for core words.
+        """
+        if not self.custom_item_name_column:
+            return True  # Process all tables if no custom column specified
+
+        # Check if any row in the table contains the custom column name (exact match)
+        for row_idx, row in enumerate(table[:10]):  # Check first 10 rows
+            if row:
+                for cell in row:
+                    if cell and self.custom_item_name_column in str(cell):
+                        logger.info(
+                            f"Table {table_num + 1} on page {page_num + 1} contains required column '{self.custom_item_name_column}' (exact match) - will process")
+                        return True
+
+        # If no exact match, check for flexible matching with core words
+        cleaned_custom_column = self._clean_text_for_matching(
+            self.custom_item_name_column)
+        core_words = ["費目", "工種", "種別", "細目"]
+        custom_word_count = sum(
+            1 for word in core_words if word in cleaned_custom_column)
+
+        if custom_word_count >= 2:  # If custom column contains core words, use flexible matching
+            for row_idx, row in enumerate(table[:10]):
+                if row:
+                    for cell in row:
+                        if cell:
+                            cleaned_cell = self._clean_text_for_matching(
+                                str(cell))
+                            cell_word_count = sum(
+                                1 for word in core_words if word in cleaned_cell)
+
+                            # If both custom column and cell contain 2+ core words, consider it a match
+                            if cell_word_count >= 2:
+                                logger.info(
+                                    f"Table {table_num + 1} on page {page_num + 1} contains matching core words (flexible match) - will process")
+                                logger.info(
+                                    f"  Custom column: '{self.custom_item_name_column}' -> '{cleaned_custom_column}'")
+                                logger.info(
+                                    f"  Found cell: '{cell}' -> '{cleaned_cell}'")
+                                return True
+
+        logger.info(
+            f"Table {table_num + 1} on page {page_num + 1} does not contain required column '{self.custom_item_name_column}' - skipping")
+        return False
+
     def _process_single_table(self, table: List[List], page_num: int, table_num: int) -> List[TenderItem]:
         """
         Process a single table and extract all valid items from it.
@@ -135,6 +209,10 @@ class PDFParser:
         if not table or len(table) < 2:
             logger.warning(
                 f"Table {table_num + 1} on page {page_num + 1} is too small (less than 2 rows)")
+            return items
+
+        # Check if this table should be processed based on custom column requirements
+        if not self._should_process_table(table, page_num, table_num):
             return items
 
         # Find header row
@@ -267,6 +345,12 @@ class PDFParser:
             "摘要"
         ]
 
+        # If custom item name column is set, prioritize it
+        if self.custom_item_name_column:
+            # Check if the custom column is directly present in raw_fields
+            if self.custom_item_name_column in raw_fields and raw_fields[self.custom_item_name_column] and raw_fields[self.custom_item_name_column].strip():
+                return True
+
         for field in identifying_fields:
             if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
                 return True
@@ -374,16 +458,24 @@ class PDFParser:
         """
         # Priority order for creating base item key
         base_key = ""
-        key_fields = [
-            "工事区分・工種・種別・細別",
-            "摘要"
-        ]
 
-        # Get the base item name
-        for field in key_fields:
-            if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
-                base_key = raw_fields[field].strip()
-                break
+        # If custom item name column is set, prioritize it
+        if self.custom_item_name_column and self.custom_item_name_column in raw_fields:
+            if raw_fields[self.custom_item_name_column] and raw_fields[self.custom_item_name_column].strip():
+                base_key = raw_fields[self.custom_item_name_column].strip()
+
+        # Fallback to default fields if no custom column or custom column is empty
+        if not base_key:
+            key_fields = [
+                "工事区分・工種・種別・細別",
+                "摘要"
+            ]
+
+            # Get the base item name
+            for field in key_fields:
+                if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
+                    base_key = raw_fields[field].strip()
+                    break
 
         # If no base key found, try other available fields
         if not base_key:
@@ -416,14 +508,71 @@ class PDFParser:
     def _find_header_row(self, table: List[List]) -> Tuple[Optional[List], int]:
         """
         Find the header row in the table.
+        Enhanced to search through multiple rows and use flexible pattern matching.
         """
-        # Check first 3 rows for headers
-        for i, row in enumerate(table[:3]):
-            if row and any(cell and "名称" in str(cell) or "工種" in str(cell) or "数量" in str(cell) for cell in row):
-                return row, i
+        # Check up to 10 rows for headers (more flexible)
+        for i, row in enumerate(table[:10]):
+            if row:
+                # Check for standard column indicators
+                standard_indicators = ["名称", "工種", "数量", "単位", "単価", "金額"]
+                has_standard = any(cell and any(indicator in str(cell)
+                                   for indicator in standard_indicators) for cell in row)
+
+                # Check for custom column if specified
+                has_custom = False
+                if self.custom_item_name_column:
+                    has_custom = any(
+                        cell and self.custom_item_name_column in str(cell) for cell in row)
+
+                # Enhanced item name header detection using core words
+                has_item_header = self._is_item_name_header_row(row)
+
+                if has_standard or has_custom or has_item_header:
+                    logger.info(
+                        f"Found header row at index {i} with indicators: standard={has_standard}, custom={has_custom}, item_header={has_item_header}")
+                    return row, i
 
         # If no clear header found, use first row
+        logger.warning(
+            "No clear header row found, using first row as fallback")
         return table[0] if table else None, 0
+
+    def _is_item_name_header_row(self, row: List) -> bool:
+        """
+        Check if this row contains item name header based on core words.
+        Removes special characters and looks for combinations of: 費目, 工種, 種別, 細目
+        """
+        if not row:
+            return False
+
+        core_words = ["費目", "工種", "種別", "細目"]
+
+        for cell in row:
+            if cell:
+                # Remove all special characters and spaces for pattern matching
+                cleaned_cell = self._clean_text_for_matching(str(cell))
+
+                # Count how many core words are present in this cell
+                word_count = sum(
+                    1 for word in core_words if word in cleaned_cell)
+
+                # If we have 2 or more core words, this is likely an item name header
+                if word_count >= 2:
+                    logger.info(
+                        f"Item name header detected in cell: '{cell}' (cleaned: '{cleaned_cell}', words found: {word_count})")
+                    return True
+
+        return False
+
+    def _clean_text_for_matching(self, text: str) -> str:
+        """
+        Clean text by removing special characters for flexible pattern matching.
+        Keeps only Japanese characters and basic alphanumeric.
+        """
+        import re
+        # Remove common separators and special characters, keep Japanese and alphanumeric
+        cleaned = re.sub(r'[・・/\-\s\(\)（）\[\]【】「」『』\|｜\.。、，]', '', text)
+        return cleaned
 
     def _get_column_mapping(self, header_row: List) -> Dict[str, int]:
         """

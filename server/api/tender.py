@@ -29,7 +29,8 @@ async def compare_tender_files(
     excel_file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    sheet_name: Optional[str] = Form(None)
+    sheet_name: Optional[str] = Form(None),
+    item_name_column: Optional[str] = Form(None)
 ) -> ComparisonSummary:
     """
     Compare a tender PDF with an Excel proposal iteratively.
@@ -41,12 +42,15 @@ async def compare_tender_files(
         start_page: Starting page number for PDF extraction (optional)
         end_page: Ending page number for PDF extraction (optional)
         sheet_name: Specific Excel sheet name to extract from (optional)
+        item_name_column: Custom column name to use for item identification (optional)
     """
     logger.info("=== STARTING TENDER COMPARISON ===")
     logger.info(f"PDF file: {pdf_file.filename}")
     logger.info(f"Excel file: {excel_file.filename}")
     logger.info(f"PDF page range: {start_page} to {end_page}")
     logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
+    logger.info(
+        f"Custom item name column: {item_name_column or 'Default patterns'}")
 
     # Validate file types
     if not pdf_file.filename.lower().endswith('.pdf'):
@@ -99,13 +103,13 @@ async def compare_tender_files(
         # Extract items from PDF with page range
         logger.info("Extracting items from PDF with specified parameters...")
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, item_name_column)
         logger.info(f"Total PDF items extracted: {len(pdf_items)}")
 
         # Extract items from Excel with sheet filter
         logger.info("Extracting items from Excel with specified parameters...")
         excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
+            excel_buffer, sheet_name, item_name_column)
         logger.info(f"Total Excel items extracted: {len(excel_items)}")
 
         # Close Excel buffer
@@ -179,7 +183,8 @@ async def compare_tender_files_missing_only(
     excel_file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    sheet_name: Optional[str] = Form(None)
+    sheet_name: Optional[str] = Form(None),
+    item_name_column: Optional[str] = Form(None)
 ):
     """
     Compare tender files and return only the missing items (PDF items not in Excel).
@@ -191,10 +196,13 @@ async def compare_tender_files_missing_only(
         start_page: Starting page number for PDF extraction (optional)
         end_page: Ending page number for PDF extraction (optional)
         sheet_name: Specific Excel sheet name to extract from (optional)
+        item_name_column: Custom column name to use for item identification (optional)
     """
     logger.info("=== STARTING MISSING ITEMS COMPARISON ===")
     logger.info(f"PDF page range: {start_page} to {end_page}")
     logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
+    logger.info(
+        f"Custom item name column: {item_name_column or 'Default patterns'}")
 
     # Same file processing as main endpoint
     if not pdf_file.filename.lower().endswith('.pdf'):
@@ -231,9 +239,9 @@ async def compare_tender_files_missing_only(
         excel_parser = ExcelParser()
 
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, item_name_column)
         excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
+            excel_buffer, sheet_name, item_name_column)
         excel_buffer.close()
 
         # Get only missing items
@@ -302,7 +310,8 @@ async def compare_tender_files_mismatches_only(
     excel_file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    sheet_name: Optional[str] = Form(None)
+    sheet_name: Optional[str] = Form(None),
+    item_name_column: Optional[str] = Form(None)
 ):
     """
     Compare tender files and return only the quantity mismatches.
@@ -314,10 +323,13 @@ async def compare_tender_files_mismatches_only(
         start_page: Starting page number for PDF extraction (optional)
         end_page: Ending page number for PDF extraction (optional)
         sheet_name: Specific Excel sheet name to extract from (optional)
+        item_name_column: Custom column name to use for item identification (optional)
     """
     logger.info("=== STARTING QUANTITY MISMATCHES COMPARISON ===")
     logger.info(f"PDF page range: {start_page} to {end_page}")
     logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
+    logger.info(
+        f"Custom item name column: {item_name_column or 'Default patterns'}")
 
     # Same file processing as main endpoint
     if not pdf_file.filename.lower().endswith('.pdf'):
@@ -354,9 +366,9 @@ async def compare_tender_files_mismatches_only(
         excel_parser = ExcelParser()
 
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, item_name_column)
         excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
+            excel_buffer, sheet_name, item_name_column)
         excel_buffer.close()
 
         # Get only mismatched items
