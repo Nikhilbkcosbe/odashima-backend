@@ -309,32 +309,187 @@ class ExcelParser:
 
     def _find_subtable_end(self, df: pd.DataFrame, start_row: int, max_row: int) -> int:
         """
-        Find the end row of a subtable by looking for the next header or empty section.
+        Enhanced subtable end detection: Find the end row of a subtable by looking for the next header or empty section.
+
+        ENHANCED LOGIC:
+        - Any single completely empty row indicates end of subtable (not requiring 3+ consecutive empty rows)
+        - Header rows indicate start of new subtable
+        - More sophisticated empty row detection considers data patterns
         """
         current_row = start_row
         consecutive_empty_rows = 0
+        last_data_row = start_row - 1  # Track the last row with actual data
+
+        logger.debug(f"Finding subtable end starting from row {start_row + 1}")
 
         while current_row < max_row:
             row = df.iloc[current_row]
 
             # Check if this looks like a new header row
             if self._is_potential_header_row(row):
-                # Found potential next header, end current subtable here
-                return current_row - 1
+                logger.debug(
+                    f"Found potential header at row {current_row + 1}, ending subtable at row {last_data_row + 1}")
+                return last_data_row
 
-            # Check if row is empty
-            if self._is_completely_empty_row(row):
+            # Enhanced empty row detection
+            if self._is_subtable_boundary_row(row):
                 consecutive_empty_rows += 1
-                # If we find 3+ consecutive empty rows, consider it end of subtable
-                if consecutive_empty_rows >= 3:
-                    return current_row - consecutive_empty_rows
+                logger.debug(
+                    f"Empty row detected at {current_row + 1}, consecutive count: {consecutive_empty_rows}")
+
+                # ENHANCED: Even 1 empty row can indicate subtable end if followed by significant gap or new data pattern
+                if consecutive_empty_rows >= 1:
+                    # Look ahead to see if this is a real boundary
+                    if self._is_real_subtable_boundary(df, current_row, max_row, consecutive_empty_rows):
+                        logger.info(
+                            f"Subtable boundary confirmed at row {current_row + 1}, ending subtable at row {last_data_row + 1}")
+                        return last_data_row
             else:
+                # Found non-empty row, reset counter and update last data row
+                if consecutive_empty_rows > 0:
+                    logger.debug(
+                        f"Non-empty row at {current_row + 1}, resetting empty row counter")
                 consecutive_empty_rows = 0
+                last_data_row = current_row
 
             current_row += 1
 
         # Reached end of sheet
-        return max_row - 1
+        logger.debug(
+            f"Reached end of sheet, subtable ends at row {last_data_row + 1}")
+        return last_data_row
+
+    def _is_subtable_boundary_row(self, row: pd.Series) -> bool:
+        """
+        Conservative check for subtable boundary rows.
+        ONLY treats completely empty rows as boundaries to preserve row spanning logic.
+        """
+        # Only treat completely empty rows as boundaries
+        # This ensures row spanning logic is preserved for rows with any meaningful content
+        return self._is_completely_empty_row(row)
+
+    def _is_real_subtable_boundary(self, df: pd.DataFrame, empty_row_start: int, max_row: int, consecutive_empty_count: int) -> bool:
+        """
+        Conservative boundary detection - only treat truly empty rows as subtable boundaries.
+        This preserves row spanning logic while still detecting genuine subtable separations.
+
+        Args:
+            df: DataFrame to analyze
+            empty_row_start: Starting row of empty sequence
+            max_row: Maximum row to check
+            consecutive_empty_count: Number of consecutive empty rows found
+
+        Returns:
+            True if this represents a real subtable boundary
+        """
+        # Strategy 1: Multiple consecutive empty rows = definitive boundary
+        if consecutive_empty_count >= 2:
+            logger.debug(
+                f"Confirmed boundary: {consecutive_empty_count} consecutive empty rows")
+            return True
+
+        # Strategy 2: Single empty row - CONSERVATIVE: Only treat as boundary if followed by clear indicators
+        if consecutive_empty_count == 1:
+            # Look ahead to see if this is followed by a clear new subtable start
+            look_ahead_range = min(5, max_row - empty_row_start - 1)
+
+            for i in range(1, look_ahead_range + 1):
+                check_row_idx = empty_row_start + i
+                if check_row_idx >= max_row:
+                    break
+
+                check_row = df.iloc[check_row_idx]
+
+                # Clear boundary indicators: another empty row or header
+                if self._is_subtable_boundary_row(check_row):
+                    logger.debug(
+                        f"Confirmed boundary: Found additional empty row at {check_row_idx + 1}")
+                    return True
+
+                if self._is_potential_header_row(check_row):
+                    logger.debug(
+                        f"Confirmed boundary: Found header row at {check_row_idx + 1}")
+                    return True
+
+                # If we find meaningful data that could be part of row spanning, don't treat as boundary
+                if self._has_meaningful_data(check_row):
+                    # Check if this looks like it could be part of row spanning (quantity-only or similar structure)
+                    if self._could_be_row_spanning_continuation(check_row):
+                        logger.debug(
+                            f"Boundary rejected: Row {check_row_idx + 1} looks like row spanning continuation")
+                        return False
+                    # If it's clearly different data pattern, it might be a boundary
+                    elif self._has_different_data_pattern(check_row):
+                        logger.debug(
+                            f"Confirmed boundary: Different data pattern at {check_row_idx + 1}")
+                        return True
+
+            # CONSERVATIVE: If no clear indicators, don't treat as boundary to preserve row spanning
+            logger.debug(
+                f"Boundary rejected: No clear boundary indicators found, preserving for row spanning")
+            return False
+
+        return False
+
+    def _could_be_row_spanning_continuation(self, row: pd.Series) -> bool:
+        """
+        Check if row could be a continuation of row spanning logic.
+        This helps preserve row spanning by not treating potential quantity-only rows as boundaries.
+        """
+        non_empty_cells = 0
+        numeric_cells = 0
+
+        # Check first 10 columns for data pattern
+        for value in row[:10]:
+            if not pd.isna(value):
+                str_value = str(value).strip()
+                if str_value and str_value not in ["", "None", "nan", "NaN", "0"]:
+                    non_empty_cells += 1
+                    if self._is_numeric(str_value):
+                        numeric_cells += 1
+
+        # Row spanning continuation often has:
+        # 1. Few non-empty cells (1-3)
+        # 2. At least one numeric value (quantity)
+        # 3. Low overall data density
+
+        could_be_spanning = (
+            non_empty_cells <= 3 and  # Low data density
+            # Has at least one number (potential quantity)
+            numeric_cells >= 1 and
+            non_empty_cells >= 1      # But not completely empty
+        )
+
+        if could_be_spanning:
+            logger.debug(
+                f"Row could be row spanning continuation: {non_empty_cells} cells, {numeric_cells} numeric")
+
+        return could_be_spanning
+
+    def _has_similar_data_structure(self, row: pd.Series) -> bool:
+        """
+        Check if row has similar data structure to typical construction tender data.
+        This helps determine if data is continuation of same subtable.
+        """
+        non_empty_cells = 0
+        numeric_cells = 0
+        text_cells = 0
+
+        for value in row[:10]:  # Check first 10 columns typically used in construction data
+            if not pd.isna(value):
+                str_value = str(value).strip()
+                if str_value and str_value not in ["", "None", "nan", "NaN"]:
+                    non_empty_cells += 1
+                    if self._is_numeric(str_value):
+                        numeric_cells += 1
+                    else:
+                        text_cells += 1
+
+        # Construction tender rows typically have mixed text and numeric data
+        has_mixed_data = text_cells > 0 and numeric_cells > 0
+        has_reasonable_density = non_empty_cells >= 2
+
+        return has_mixed_data and has_reasonable_density
 
     def _is_potential_header_row(self, row: pd.Series) -> bool:
         """
@@ -355,6 +510,75 @@ class ExcelParser:
 
         # If we have 2+ header patterns, it's likely a header
         return matches >= 2
+
+    def _has_different_data_pattern(self, row: pd.Series) -> bool:
+        """
+        Check if row has a significantly different data pattern that might indicate a new subtable.
+        """
+        non_empty_values = [str(val).strip()
+                            for val in row if pd.notna(val) and str(val).strip()]
+
+        if len(non_empty_values) == 0:
+            return False
+
+        # Check for patterns that indicate new subtable start
+        summary_patterns = ["合計", "小計", "計", "総計", "計算", "計画", "予算", "概算"]
+        header_patterns = ["工種", "種別", "細別",
+                           "数量", "単位", "費目", "名称", "規格", "項目"]
+
+        row_text = " ".join(non_empty_values).replace("　", "").replace(" ", "")
+
+        # If row contains summary patterns, it might be end of previous subtable
+        has_summary = any(pattern in row_text for pattern in summary_patterns)
+
+        # If row contains header patterns, it might be start of new subtable
+        has_header_pattern = any(
+            pattern in row_text for pattern in header_patterns)
+
+        return has_summary or has_header_pattern
+
+    def _has_meaningful_data(self, row: pd.Series) -> bool:
+        """
+        Check if row contains meaningful data (not just structural elements).
+        """
+        meaningful_content = 0
+
+        for value in row:
+            if not pd.isna(value):
+                str_value = str(value).strip()
+                if str_value and str_value not in ["", "None", "nan", "NaN", "0"]:
+                    # Check if it looks like meaningful content
+                    if len(str_value) > 2 or str_value.isdigit() or any(char.isalpha() for char in str_value):
+                        meaningful_content += 1
+
+        return meaningful_content >= 2  # At least 2 cells with meaningful content
+
+    def _is_natural_subtable_break(self, row_position: int) -> bool:
+        """
+        Check if this position represents a natural subtable break based on position patterns.
+        Some Excel files have natural breaking points that don't necessarily have multiple empty rows.
+        """
+        # This is a heuristic - in practice, you might want to adjust this based on your specific Excel format
+        # For now, we'll be conservative and only confirm breaks that have clear indicators
+        return False
+
+    def _is_completely_empty_row(self, row: pd.Series) -> bool:
+        """
+        Enhanced check if all cells in the row are empty or contain only whitespace/NaN.
+        Now includes more comprehensive empty value detection.
+        """
+        for value in row:
+            if not pd.isna(value):
+                str_value = str(value).strip()
+                # Enhanced empty value detection
+                if str_value and str_value not in ["", "None", "nan", "NaN", "0", "0.0", "-", "―", "ー"]:
+                    # Check if it's just whitespace or special characters
+                    clean_value = str_value.replace("　", "").replace(
+                        " ", "").replace("\t", "").replace("\n", "")
+                    if clean_value:  # If there's still content after removing whitespace
+                        return False
+
+        return True
 
     def _process_single_subtable(self, df: pd.DataFrame, subtable_info: Dict, sheet_name: str, sheet_idx: int, subtable_idx: int) -> List[TenderItem]:
         """
@@ -674,6 +898,7 @@ class ExcelParser:
                                                raw_fields: Dict[str, str], quantity: float) -> str:
         """
         Combine the previous incomplete item with current item by concatenating their names.
+        Enhanced to avoid concatenating reference codes from 摘要 column.
         """
         if not existing_items:
             logger.warning(
@@ -690,6 +915,29 @@ class ExcelParser:
 
         # Get current item name from this row
         current_item_key = self._create_item_key_from_fields(raw_fields)
+
+        # Check if the current item key is just a reference code from 摘要
+        if current_item_key and self._is_reference_code(current_item_key):
+            logger.info(
+                f"Excel row spanning: Detected reference code '{current_item_key}' - completing item without concatenation")
+
+            # Don't concatenate reference codes, just complete the item with quantity
+            old_item_key = last_item.item_key
+            last_item.quantity = quantity
+
+            # Add the reference code to raw_fields but don't change the item name
+            for field_name, field_value in raw_fields.items():
+                if field_name not in last_item.raw_fields or not last_item.raw_fields[field_name]:
+                    last_item.raw_fields[field_name] = field_value
+                    logger.debug(
+                        f"Excel: Added field '{field_name}' = '{field_value}' to item '{last_item.item_key}'")
+
+            logger.info(
+                f"Excel row spanning completed: '{old_item_key}' quantity 0.0 -> {quantity} (reference code '{current_item_key}' not concatenated)")
+
+            return "merged"
+
+        # If current key is not a reference code, proceed with normal concatenation
         if not current_item_key:
             logger.warning(
                 "Excel: Cannot create item key from current row for concatenation")
@@ -760,6 +1008,7 @@ class ExcelParser:
                                                    raw_fields: Dict[str, str], quantity: float) -> str:
         """
         Complete the previous incomplete item with quantity and unit data.
+        ENHANCED: Only completes when 単位 (unit) field is present to ensure valid row spanning.
         """
         if not existing_items:
             logger.warning(
@@ -772,6 +1021,13 @@ class ExcelParser:
         if last_item.quantity > 0:
             logger.warning(
                 f"Excel: Previous item '{last_item.item_key}' already has quantity {last_item.quantity}")
+            return "skipped"
+
+        # CRITICAL: Must have 単位 (unit) field to be a valid completion row
+        # This prevents table numbers from being treated as quantity completion
+        if "単位" not in raw_fields or not raw_fields["単位"].strip():
+            logger.debug(
+                f"Excel: Rejecting completion row - no unit field present (quantity={quantity})")
             return "skipped"
 
         # Update the last item with quantity and any additional fields
@@ -787,44 +1043,43 @@ class ExcelParser:
 
         logger.info(
             f"Excel row spanning completed: '{last_item.item_key}' quantity {old_quantity} -> {quantity}")
-        if "単位" in raw_fields:
-            logger.info(
-                f"Excel row spanning: Added unit '{raw_fields['単位']}' to '{last_item.item_key}'")
+        logger.info(
+            f"Excel row spanning: Added unit '{raw_fields['単位']}' to '{last_item.item_key}'")
 
         return "merged"
-
-    def _is_completely_empty_row(self, row: pd.Series) -> bool:
-        """
-        Check if all cells in the row are empty or contain only whitespace/NaN.
-        """
-        for value in row:
-            if not pd.isna(value):
-                str_value = str(value).strip()
-                if str_value and str_value not in ["", "None", "nan", "NaN", "0"]:
-                    return False
-
-        return True
 
     def _is_quantity_only_row(self, raw_fields: Dict[str, str], quantity: float) -> bool:
         """
         Enhanced check for quantity-only rows (indicating row spanning).
+        Only considers a row as quantity-only if it has 単位 (unit) field present.
+        This prevents table numbers from being treated as quantities.
         """
         # Must have quantity but no other meaningful fields
         if quantity <= 0:
             return False
 
-        # Check if we have any meaningful non-quantity fields
+        # CRITICAL: Must have 単位 (unit) field to be considered a valid quantity row
+        # This prevents table numbers (1, 2, 4, 5) from being treated as quantities
+        if "単位" not in raw_fields or not raw_fields["単位"].strip():
+            logger.debug(
+                f"Excel: Rejecting quantity-only row - no unit field present (quantity={quantity})")
+            return False
+
+        # Check if we have any meaningful non-quantity fields (excluding unit)
         meaningful_fields = 0
         for field_name, field_value in raw_fields.items():
-            if field_value and field_value.strip():
+            if field_name != "単位" and field_value and field_value.strip():
                 meaningful_fields += 1
 
-        # If we have quantity but no other fields, it's a spanned row
+        # If we have quantity + unit but no other fields, it's a valid spanned row
         is_quantity_only = meaningful_fields == 0
 
         if is_quantity_only:
             logger.debug(
-                f"Excel: Detected quantity-only row: quantity={quantity}, fields={meaningful_fields}")
+                f"Excel: Detected valid quantity-only row with unit: quantity={quantity}, unit='{raw_fields['単位']}'")
+        else:
+            logger.debug(
+                f"Excel: Rejecting quantity-only row - has other meaningful fields: {meaningful_fields}")
 
         return is_quantity_only
 
@@ -850,10 +1105,13 @@ class ExcelParser:
 
         return "merged"
 
-    def _create_item_key_from_fields(self, raw_fields: Dict[str, str]) -> str:
+    def _create_item_key_from_fields(self, raw_fields: Dict[str, str], exclude_reference_codes: bool = False) -> str:
         """
         Create item key prioritizing actual item names from hierarchical columns over remarks.
-        Fixed: Extract actual item names, not reference codes from remarks.
+
+        Args:
+            raw_fields: Dictionary of field values from the row
+            exclude_reference_codes: If True, excludes 摘要 (remarks) data to avoid reference codes
         """
         # Priority 1: If custom item name column is set, prioritize it
         if self.custom_item_name_column and self.custom_item_name_column in raw_fields:
@@ -884,29 +1142,59 @@ class ExcelParser:
             if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
                 return raw_fields[field].strip()
 
-        # Priority 4: Last resort - use remarks (but this gives reference codes like "明1号")
-        if "摘要" in raw_fields and raw_fields["摘要"] and raw_fields["摘要"].strip():
+        # Priority 4: Last resort - use remarks (but only if not excluding reference codes)
+        if not exclude_reference_codes and "摘要" in raw_fields and raw_fields["摘要"] and raw_fields["摘要"].strip():
             return raw_fields["摘要"].strip()
 
         # Fallback to default fields if no custom column or custom column is empty
         key_fields = [
             "工事区分・工種・種別・細別",
-            "規格",
-            "摘要"
+            "規格"
         ]
+
+        # Add 摘要 only if not excluding reference codes
+        if not exclude_reference_codes:
+            key_fields.append("摘要")
 
         # Use the first available field as the key
         for field in key_fields:
             if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
                 return raw_fields[field].strip()
 
-        # If no primary fields available, create a simple key from available data
+        # If no primary fields available, create a simple key from available data (excluding quantity/price fields)
         for field_name, field_value in raw_fields.items():
-            if field_value and field_value.strip() and field_name not in ["単位", "数量", "単価", "金額"]:
+            if field_value and field_value.strip() and field_name not in ["単位", "数量", "単価", "金額", "摘要" if exclude_reference_codes else ""]:
                 return field_value.strip()
 
         # Return empty string if no meaningful key can be created
         return ""
+
+    def _is_reference_code(self, text: str) -> bool:
+        """
+        Check if text looks like a reference code (e.g., 明54号, 23号内訳書) rather than an actual item name.
+        """
+        if not text or not text.strip():
+            return False
+
+        text = text.strip()
+
+        # Common patterns for reference codes in Japanese construction documents
+        reference_patterns = [
+            r'^明\d+号$',        # 明54号, 明5号
+            r'^\d+号内訳書$',     # 23号内訳書
+            r'^\d+号$',          # Just number + 号
+            r'^[A-Z]+\d+$',      # Letter + number codes
+            r'^別紙\d+$',        # 別紙1, 別紙2
+            r'^図\d+$',          # 図1, 図2
+            r'^表\d+$',          # 表1, 表2
+        ]
+
+        import re
+        for pattern in reference_patterns:
+            if re.match(pattern, text):
+                return True
+
+        return False
 
     def _process_single_row(self, row: pd.Series, col_mapping: Dict[str, int],
                             sheet_name: str, sheet_idx: int, row_idx: int) -> Optional[TenderItem]:
