@@ -24,46 +24,22 @@ class ExcelParser:
             "摘要": ["摘要", "備考", "摘 要"]
         }
         self.column_patterns = self.default_column_patterns.copy()
-        self.custom_item_name_column = None
-
-    def set_custom_item_name_column(self, custom_column_name: Optional[str]):
-        """
-        Set a custom column name for item identification and update patterns accordingly.
-
-        Args:
-            custom_column_name: The custom column name to use for item identification
-        """
-        if custom_column_name:
-            self.custom_item_name_column = custom_column_name
-            # Create updated patterns with the custom column name as the primary item identifier
-            self.column_patterns = self.default_column_patterns.copy()
-            self.column_patterns["工事区分・工種・種別・細別"] = [
-                custom_column_name] + self.default_column_patterns["工事区分・工種・種別・細別"]
-            logger.info(
-                f"Excel Parser: Set custom item name column to '{custom_column_name}'")
-        else:
-            self.custom_item_name_column = None
-            self.column_patterns = self.default_column_patterns.copy()
-            logger.info("Excel Parser: Using default column patterns")
 
     def extract_items_from_buffer(self, excel_buffer: BytesIO) -> List[TenderItem]:
         """
         Extract items from Excel buffer iteratively, sheet by sheet.
         """
-        return self.extract_items_from_buffer_with_sheet(excel_buffer, None, None)
+        return self.extract_items_from_buffer_with_sheet(excel_buffer, None)
 
-    def extract_items_from_buffer_with_sheet(self, excel_buffer: BytesIO, sheet_name: Optional[str] = None, item_name_column: Optional[str] = None) -> List[TenderItem]:
+    def extract_items_from_buffer_with_sheet(self, excel_buffer: BytesIO, sheet_name: Optional[str] = None) -> List[TenderItem]:
         """
-        Extract items from Excel buffer with optional sheet filtering.
+        Extract items from Excel buffer iteratively, sheet by sheet.
+        Focuses on the specified sheet or all sheets if none specified.
 
         Args:
             excel_buffer: BytesIO buffer containing Excel data
-            sheet_name: Specific sheet name to extract from (None means all sheets)
-            item_name_column: Custom column name to use for item identification (optional)
+            sheet_name: Specific sheet name to extract from (optional)
         """
-        # Set custom item name column if provided
-        self.set_custom_item_name_column(item_name_column)
-
         all_items = []
         excel_file = None
 
@@ -244,16 +220,10 @@ class ExcelParser:
             # Enhanced item name header detection using core words
             has_item_header = self._is_item_name_header_row(row)
 
-            # Check for custom column if specified
-            has_custom = False
-            if self.custom_item_name_column:
-                has_custom = any(self.custom_item_name_column in str(val)
-                                 for val in row if pd.notna(val))
-
             # If we find multiple matching patterns or item header, it's likely a header
-            if matches >= 2 or has_item_header or has_custom:
+            if matches >= 2 or has_item_header:
                 logger.info(
-                    f"Header found at row {i + 1} with {matches} patterns, item_header={has_item_header}, custom={has_custom}")
+                    f"Header found at row {i + 1} with {matches} patterns, item_header={has_item_header}")
                 return i, row
 
             # Special handling for combined header patterns
@@ -266,46 +236,9 @@ class ExcelParser:
 
     def _should_process_subtable(self, header_row: pd.Series, sheet_name: str, subtable_num: int) -> bool:
         """
-        Check if a subtable should be processed based on custom column requirements.
-        Enhanced to use flexible pattern matching for core words, similar to PDF parser.
+        Check if a subtable should be processed.
         """
-        if not self.custom_item_name_column:
-            return True  # Process all subtables if no custom column specified
-
-        # Check if any cell in the header row contains the custom column name (exact match)
-        for cell in header_row:
-            if pd.notna(cell) and self.custom_item_name_column in str(cell):
-                logger.info(
-                    f"Subtable {subtable_num + 1} in sheet '{sheet_name}' contains required column '{self.custom_item_name_column}' (exact match) - will process")
-                return True
-
-        # If no exact match, check for flexible matching with core words
-        cleaned_custom_column = self._clean_text_for_matching(
-            self.custom_item_name_column)
-        core_words = ["費目", "工種", "種別", "細目"]
-        custom_word_count = sum(
-            1 for word in core_words if word in cleaned_custom_column)
-
-        if custom_word_count >= 2:  # If custom column contains core words, use flexible matching
-            for cell in header_row:
-                if pd.notna(cell):
-                    cleaned_cell = self._clean_text_for_matching(str(cell))
-                    cell_word_count = sum(
-                        1 for word in core_words if word in cleaned_cell)
-
-                    # If both custom column and cell contain 2+ core words, consider it a match
-                    if cell_word_count >= 2:
-                        logger.info(
-                            f"Subtable {subtable_num + 1} in sheet '{sheet_name}' contains matching core words (flexible match) - will process")
-                        logger.info(
-                            f"  Custom column: '{self.custom_item_name_column}' -> '{cleaned_custom_column}'")
-                        logger.info(
-                            f"  Found cell: '{cell}' -> '{cleaned_cell}'")
-                        return True
-
-        logger.info(
-            f"Subtable {subtable_num + 1} in sheet '{sheet_name}' does not contain required column '{self.custom_item_name_column}' - skipping")
-        return False
+        return True  # Process all subtables
 
     def _find_subtable_end(self, df: pd.DataFrame, start_row: int, max_row: int) -> int:
         """
@@ -814,161 +747,227 @@ class ExcelParser:
                                           sheet_name: str, sheet_idx: int, row_idx: int,
                                           existing_items: List) -> Union[TenderItem, str, None]:
         """
-        Enhanced row spanning logic to handle:
-        - Row 1: Has item name but no quantity (or quantity = 0)
-        - Row 2: Has quantity and unit but no item name -> Combine into single item
-        - Row 2: Has item name AND quantity/unit -> Concatenate names and combine
+        SIMPLIFIED: Process a single row focusing ONLY on 2 essential columns:
+        1. Item name column: 費目・工種・種別・細別・規格 and variations
+        2. Quantity column: 数　量 and variations
+
+        Simple row spanning logic:
+        - Row with item name but no quantity → incomplete item
+        - Row with quantity but no item name → complete previous incomplete item
+        - Row with both → complete item (or combine if previous incomplete)
         """
-        # First check if row is completely empty
-        if self._is_completely_empty_row(row):
+        # Extract ONLY the 2 essential fields
+        item_name = self._extract_item_name_simple(row, col_mapping)
+        quantity = self._extract_quantity_simple(row, col_mapping)
+
+        logger.info(
+            f"Excel Row {row_idx}: RAW DATA: " +
+            " ".join([f"[{i}]='{row.iloc[i]}'" for i in range(
+                min(8, len(row))) if pd.notna(row.iloc[i]) and str(row.iloc[i]).strip()])
+        )
+        logger.info(
+            f"Excel Row {row_idx}: EXTRACTED: item='{item_name}', quantity={quantity}")
+
+        # ENHANCED: Check context before filtering - don't filter potential completion rows
+        has_previous_incomplete = existing_items and existing_items[-1].quantity == 0
+
+        # Skip table headers and structural elements, BUT NOT if we have a previous incomplete item
+        if self._is_table_header_or_structural_with_context(row, item_name, quantity, has_previous_incomplete):
+            logger.info(
+                f"Excel Row {row_idx}: SKIP - Table header/structural element")
             return "skipped"
 
-        # Extract fields from row
-        raw_fields = {}
-        quantity = 0.0
-
-        for col_name, col_idx in col_mapping.items():
-            if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
-                cell_value = str(row.iloc[col_idx]).strip()
-                if cell_value and cell_value not in ["", "None", "nan", "0"]:
-                    if col_name == "数量":
-                        quantity = self._extract_quantity(cell_value)
-                    else:
-                        raw_fields[col_name] = cell_value
-
-        # Check what type of data this row contains
-        has_item_fields = self._has_item_identifying_fields(raw_fields)
-        has_quantity_data = quantity > 0 or "単位" in raw_fields
-
-        logger.debug(
-            f"Excel Row {row_idx}: has_item_fields={has_item_fields}, has_quantity_data={has_quantity_data}, quantity={quantity}")
-
-        # Case 1: Row has item fields but no quantity data (incomplete item - needs spanning)
-        if has_item_fields and not has_quantity_data:
-            logger.debug(
-                f"Excel Row {row_idx}: Creating incomplete item (name only) - expecting quantity in next row")
-            item_key = self._create_item_key_from_fields(raw_fields)
-            if not item_key:
-                return "skipped"
-
+        # CASE 1: Row has item name but no quantity → incomplete item
+        if item_name and quantity == 0:
+            logger.info(
+                f"Excel Row {row_idx}: CASE 1 - Incomplete item: '{item_name}'")
+            raw_fields = {"工事区分・工種・種別・細別": item_name}
             return TenderItem(
-                item_key=item_key,
+                item_key=item_name,
                 raw_fields=raw_fields,
-                quantity=0.0,  # Will be updated when quantity row is found
+                quantity=0.0,
                 source="Excel"
             )
 
-        # Case 2: Row has quantity data but no item fields (completion row for spanning)
-        elif has_quantity_data and not has_item_fields:
-            logger.debug(
-                f"Excel Row {row_idx}: Found completion row with quantity data only")
-            # Check if this is a pure quantity-only row (row spanning scenario)
-            if self._is_quantity_only_row(raw_fields, quantity):
-                return self._merge_quantity_with_previous_item(existing_items, quantity)
-            else:
-                return self._complete_previous_item_with_quantity_data(existing_items, raw_fields, quantity)
-
-        # Case 3: Row has both item fields and quantity data
-        elif has_item_fields and has_quantity_data:
-            # First check if previous item exists and needs completion (quantity = 0)
+        # CASE 2: Row has item name + quantity → complete item (or combine with previous)
+        elif item_name and quantity > 0:
+            # Check if previous item needs completion
             if existing_items and existing_items[-1].quantity == 0:
-                logger.debug(
-                    f"Excel Row {row_idx}: Found item with name+quantity, combining with previous incomplete item")
-                return self._combine_items_with_name_concatenation(existing_items, raw_fields, quantity)
+                logger.info(
+                    f"Excel Row {row_idx}: CASE 2A - Combining '{item_name}' with previous incomplete item")
+                return self._combine_with_previous_item_simple(existing_items, item_name, quantity)
             else:
-                logger.debug(
-                    f"Excel Row {row_idx}: Creating complete standalone item")
-                item_key = self._create_item_key_from_fields(raw_fields)
-                if not item_key:
-                    return "skipped"
-
+                logger.info(
+                    f"Excel Row {row_idx}: CASE 2B - Complete item: '{item_name}' {quantity}")
+                raw_fields = {"工事区分・工種・種別・細別": item_name}
                 return TenderItem(
-                    item_key=item_key,
+                    item_key=item_name,
                     raw_fields=raw_fields,
                     quantity=quantity,
                     source="Excel"
                 )
 
-        # Case 4: Row has neither meaningful item fields nor quantity data
+        # CASE 3: Row has quantity but no item name → complete previous incomplete item
+        elif not item_name and quantity > 0:
+            # CRITICAL FIX: Don't filter out potential completion rows for hierarchical items
+            if existing_items and existing_items[-1].quantity == 0:
+                logger.info(
+                    f"Excel Row {row_idx}: CASE 3 - Completing previous item with quantity {quantity}")
+                return self._complete_previous_item_simple(existing_items, quantity)
+            else:
+                logger.info(
+                    f"Excel Row {row_idx}: CASE 3-SKIP - Quantity without item name and no previous incomplete item")
+                return "skipped"
+
+        # CASE 4: No useful data
         else:
-            logger.debug(f"Excel Row {row_idx}: Skipping - no meaningful data")
+            logger.info(
+                f"Excel Row {row_idx}: CASE 4 - No useful data, skipping")
             return "skipped"
 
-    def _combine_items_with_name_concatenation(self, existing_items: List[TenderItem],
-                                               raw_fields: Dict[str, str], quantity: float) -> str:
+    def _is_table_header_or_structural_with_context(self, row: pd.Series, item_name: str, quantity: float, has_previous_incomplete: bool) -> bool:
         """
-        Combine the previous incomplete item with current item by concatenating their names.
-        Enhanced to avoid concatenating reference codes from 摘要 column.
+        ENHANCED: Check if row is a table header or structural element to skip.
+        CONTEXT-AWARE: Don't filter out potential completion rows when there's a previous incomplete item!
+        CRITICAL FIX: Never filter rows that have valid quantities - they are real data rows!
+        """
+        # CRITICAL: Never filter rows with valid quantities (> 0) - they contain actual data
+        if quantity > 0:
+            logger.debug(f"Not filtering row with valid quantity: {quantity}")
+            return False
+
+        # Skip rows that look like table headers (but only if they have no quantity)
+        if item_name:
+            header_patterns = [
+                "費目", "工種", "種別", "細別", "規格", "数量", "単位", "単価", "金額", "摘要",
+                "名称", "品名", "項目", "明細"
+            ]
+            if any(pattern in item_name for pattern in header_patterns):
+                return True
+
+        # CRITICAL: If we have a previous incomplete item, don't filter potential completion rows
+        if has_previous_incomplete and not item_name and quantity > 0:
+            logger.debug(
+                f"Not filtering potential completion row: quantity={quantity} for previous incomplete item")
+            return False
+
+        # Only filter out table numbers/structural elements (no item name, small integer quantities)
+        if not item_name and 0 < quantity <= 10 and quantity == int(quantity):
+            # Count meaningful cells in the row
+            meaningful_cells = 0
+            for cell in row:
+                if pd.notna(cell) and str(cell).strip() not in ["", "0", "0.0"]:
+                    meaningful_cells += 1
+
+            # Only filter if VERY minimal cells (≤2) to avoid filtering completion rows
+            # Completion rows typically have quantity + price, so at least 2 meaningful cells
+            if meaningful_cells <= 2:
+                return True
+
+        return False
+
+    def _extract_item_name_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
+        """
+        SIMPLIFIED: Extract item name focusing ONLY on the main item column and hierarchical columns.
+        Looks for: 費目・工種・種別・細別・規格 and variations
+        """
+        # Priority 1: Main item column
+        main_item_columns = [
+            "工事区分・工種・種別・細別",
+            "費目・工種・種別・細別・規格",
+            "費目",
+            "工種",
+            "種別",
+            "細別",
+            "規格"
+        ]
+
+        for col_name in main_item_columns:
+            if col_name in col_mapping:
+                col_idx = col_mapping[col_name]
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    if (value and value not in ["", "None", "nan", "0"] and
+                            not all(c in " 　\t\n\r" for c in value)):
+                        return value
+
+        # Priority 2: Check hierarchical columns where item names are often stored
+        for col_name, col_idx in col_mapping.items():
+            if "hierarchical_item" in col_name:
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    if (value and value not in ["", "None", "nan", "0"] and
+                        not all(c in " 　\t\n\r" for c in value) and
+                            not self._is_likely_unit(value)):
+                        return value
+
+        return ""
+
+    def _is_table_header_or_structural(self, row: pd.Series, item_name: str, quantity: float) -> bool:
+        """
+        SIMPLIFIED: Check if row is a table header or structural element to skip.
+        CRITICAL: Don't filter out potential completion rows!
+        """
+        # Skip rows that look like table headers
+        if item_name:
+            header_patterns = [
+                "費目", "工種", "種別", "細別", "規格", "数量", "単位", "単価", "金額", "摘要",
+                "名称", "品名", "項目", "明細"
+            ]
+            if any(pattern in item_name for pattern in header_patterns):
+                return True
+
+        # CRITICAL: Don't filter out potential completion rows for hierarchical items
+        # Only filter out when quantity is small AND there are very few meaningful cells
+        if not item_name and 0 < quantity <= 10 and quantity == int(quantity):
+            # Count meaningful cells in the row
+            meaningful_cells = 0
+            for cell in row:
+                if pd.notna(cell) and str(cell).strip() not in ["", "0", "0.0"]:
+                    meaningful_cells += 1
+
+            # Only filter if VERY minimal cells (≤2) to avoid filtering completion rows
+            # Completion rows typically have quantity + price, so at least 2 meaningful cells
+            if meaningful_cells <= 2:
+                return True
+
+        return False
+
+    def _combine_with_previous_item_simple(self, existing_items: List[TenderItem],
+                                           current_item_name: str, quantity: float) -> str:
+        """
+        SIMPLIFIED: Combine current item name with previous incomplete item.
         """
         if not existing_items:
-            logger.warning(
-                "Excel: Found item for concatenation but no previous item to combine with")
             return "skipped"
 
         last_item = existing_items[-1]
 
-        # Check if the last item needs completion (has quantity = 0)
-        if last_item.quantity > 0:
-            logger.warning(
-                f"Excel: Previous item '{last_item.item_key}' already has quantity {last_item.quantity}")
-            return "skipped"
-
-        # Get current item name from this row
-        current_item_key = self._create_item_key_from_fields(raw_fields)
-
-        # Check if the current item key is just a reference code from 摘要
-        if current_item_key and self._is_reference_code(current_item_key):
-            logger.info(
-                f"Excel row spanning: Detected reference code '{current_item_key}' - completing item without concatenation")
-
-            # Don't concatenate reference codes, just complete the item with quantity
-            old_item_key = last_item.item_key
-            last_item.quantity = quantity
-
-            # Add the reference code to raw_fields but don't change the item name
-            for field_name, field_value in raw_fields.items():
-                if field_name not in last_item.raw_fields or not last_item.raw_fields[field_name]:
-                    last_item.raw_fields[field_name] = field_value
-                    logger.debug(
-                        f"Excel: Added field '{field_name}' = '{field_value}' to item '{last_item.item_key}'")
-
-            logger.info(
-                f"Excel row spanning completed: '{old_item_key}' quantity 0.0 -> {quantity} (reference code '{current_item_key}' not concatenated)")
-
-            return "merged"
-
-        # If current key is not a reference code, proceed with normal concatenation
-        if not current_item_key:
-            logger.warning(
-                "Excel: Cannot create item key from current row for concatenation")
-            return "skipped"
-
-        # Concatenate item names: previous_name + current_name
-        old_item_key = last_item.item_key
-        concatenated_key = f"{old_item_key} + {current_item_key}"
-
-        # Update the last item
-        last_item.item_key = concatenated_key
+        # Combine names and set quantity
+        combined_name = f"{last_item.item_key} {current_item_name}".strip()
+        last_item.item_key = combined_name
         last_item.quantity = quantity
-
-        # Merge all fields from both rows, prioritizing new row for duplicates
-        for field_name, field_value in raw_fields.items():
-            if field_name not in last_item.raw_fields or not last_item.raw_fields[field_name]:
-                last_item.raw_fields[field_name] = field_value
-                logger.debug(
-                    f"Excel: Added field '{field_name}' = '{field_value}' to combined item")
-            else:
-                # For existing fields, combine them if different
-                existing_value = last_item.raw_fields[field_name]
-                if existing_value != field_value:
-                    last_item.raw_fields[field_name] = f"{existing_value} + {field_value}"
-                    logger.debug(
-                        f"Excel: Combined field '{field_name}' = '{existing_value} + {field_value}'")
+        last_item.raw_fields["工事区分・工種・種別・細別"] = combined_name
 
         logger.info(
-            f"Excel row spanning with name concatenation: '{old_item_key}' + '{current_item_key}' = '{concatenated_key}' with quantity {quantity}")
-
+            f"Excel: Combined items -> '{combined_name}' with quantity {quantity}")
         return "merged"
+
+    def _complete_previous_item_simple(self, existing_items: List[TenderItem], quantity: float) -> str:
+        """
+        SIMPLIFIED: Complete previous incomplete item with quantity only.
+        """
+        if not existing_items:
+            return "skipped"
+
+        last_item = existing_items[-1]
+        last_item.quantity = quantity
+
+        logger.info(
+            f"Excel: Completed item '{last_item.item_key}' with quantity {quantity}")
+        return "merged"
+
+    # REMOVED: Old complex row data completion method - replaced with simple approach
 
     def _has_item_identifying_fields(self, raw_fields: Dict[str, str]) -> bool:
         """
@@ -981,15 +980,16 @@ class ExcelParser:
             if self.custom_item_name_column in raw_fields and raw_fields[self.custom_item_name_column] and raw_fields[self.custom_item_name_column].strip():
                 return True
 
-        # Look for item names in hierarchical structure (columns 1-5 contain item names)
-        # This handles the Excel structure where item names appear in different columns based on hierarchy level
+        # Prioritize work classification column for accurate extraction
+        # Check work classification first as it has the most accurate data
+        if "工事区分・工種・種別・細別" in raw_fields and raw_fields["工事区分・工種・種別・細別"] and raw_fields["工事区分・工種・種別・細別"].strip():
+            return True
+
+        # Only check limited hierarchical fields to reduce redundant item creation
         hierarchical_item_fields = [
-            "工事区分・工種・種別・細別",  # Main field
-            "hierarchical_item_1",  # Level 1 items
-            "hierarchical_item_2",  # Level 2 items
-            "hierarchical_item_3",  # Level 3 items
-            "hierarchical_item_4",  # Level 4 items
-            "hierarchical_item_5",  # Level 5 items
+            "hierarchical_item_5",  # Most specific level
+            "hierarchical_item_4",  # Second level
+            "hierarchical_item_3",  # Third level only
         ]
 
         for field in hierarchical_item_fields:
@@ -1118,39 +1118,47 @@ class ExcelParser:
             if raw_fields[self.custom_item_name_column] and raw_fields[self.custom_item_name_column].strip():
                 return raw_fields[self.custom_item_name_column].strip()
 
-        # Priority 2: Look for actual item names in hierarchical columns (1-5)
-        # These contain the real item names like "オープンカット、土砂", not reference codes
+        # Priority 2: Work classification column has the most accurate extraction
+        # Prioritize work classification over hierarchical item fields
+        work_classification_field = "工事区分・工種・種別・細別"
+        if work_classification_field in raw_fields and raw_fields[work_classification_field] and raw_fields[work_classification_field].strip():
+            item_name = raw_fields[work_classification_field].strip()
+            # Filter out units, specifications, and obvious non-item values
+            if (not self._is_likely_unit(item_name) and
+                not self._is_likely_specification_notes(item_name) and
+                    not item_name.isdigit()):
+                return item_name
+
+        # Priority 3: Only use hierarchical columns if work classification is empty
+        # Use fewer hierarchical fields to reduce redundant items
         hierarchical_fields = [
-            "hierarchical_item_5",  # Most specific level first
+            "hierarchical_item_5",  # Most specific level only
             "hierarchical_item_4",
-            "hierarchical_item_3",
-            "hierarchical_item_2",
-            "hierarchical_item_1",
-            "工事区分・工種・種別・細別"  # Main field
+            "hierarchical_item_3"   # Only keep top 3 levels to reduce noise
         ]
 
         for field in hierarchical_fields:
             if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
                 item_name = raw_fields[field].strip()
-                # Filter out units and obvious non-item values
-                if item_name not in ["式", "m3", "m2", "m", "個", "本", "箇所", "1", "0"] and not item_name.isdigit():
+                # Filter out units, specifications, and obvious non-item values
+                if (not self._is_likely_unit(item_name) and
+                    not self._is_likely_specification_notes(item_name) and
+                        not item_name.isdigit()):
                     return item_name
 
-        # Priority 3: Fallback to specification or other fields (but not remarks which contain reference codes)
+        # Priority 4: Fallback to specification or other fields (but not remarks which contain reference codes)
         fallback_fields = ["規格"]
         for field in fallback_fields:
             if field in raw_fields and raw_fields[field] and raw_fields[field].strip():
                 return raw_fields[field].strip()
 
-        # Priority 4: Last resort - use remarks (but only if not excluding reference codes)
+        # Priority 5: Last resort - use remarks (but only if not excluding reference codes)
         if not exclude_reference_codes and "摘要" in raw_fields and raw_fields["摘要"] and raw_fields["摘要"].strip():
             return raw_fields["摘要"].strip()
 
-        # Fallback to default fields if no custom column or custom column is empty
-        key_fields = [
-            "工事区分・工種・種別・細別",
-            "規格"
-        ]
+        # Final fallback: Work classification has already been checked at Priority 2
+        # So just use specification if available
+        key_fields = ["規格"]
 
         # Add 摘要 only if not excluding reference codes
         if not exclude_reference_codes:
@@ -1195,6 +1203,510 @@ class ExcelParser:
                 return True
 
         return False
+
+    def _is_likely_unit(self, text: str) -> bool:
+        """
+        Check if text is likely a unit rather than an item name.
+        This helps prevent units from being treated as item names in row spanning scenarios.
+        """
+        if not text or not text.strip():
+            return False
+
+        text = text.strip()
+
+        # Common Japanese construction units
+        common_units = [
+            # Basic units
+            "式", "m3", "m2", "m", "cm", "mm", "km",
+            "個", "本", "箇所", "台", "基", "機", "枚", "組", "セット",
+            "kg", "t", "g", "L", "ℓ",
+
+            # Construction-specific units
+            "孔",      # holes
+            "穴",      # holes (alternative)
+            "口",      # openings/mouths
+            "回",      # times/rounds
+            "日",      # days
+            "時間",    # hours
+            "分",      # minutes
+            "年",      # years
+            "月",      # months
+            "週",      # weeks
+            "人",      # people
+            "名",      # people (counter)
+            "社",      # companies
+            "件",      # cases/items
+            "箇",      # pieces (alternative to 個)
+            "か所",    # locations (alternative to 箇所)
+            "ヶ所",    # locations (another alternative)
+            "ケ所",    # locations (katakana version)
+
+            # Specific units found in problem cases
+            "構造物",   # structures (found in 左官工法 case)
+            "部材",     # members/materials (found in 補強部材 cases)
+            "掛m2",     # hanging square meters (found in 単管足場 case)
+            "掛㎡",     # hanging square meters (alternative)
+
+            # Measurement units
+            "㎡", "㎥", "㎝", "㎜", "㎞",
+            "ha", "a",  # area units
+            "坪", "畳",  # Japanese area units
+
+            # Common single digit indicators
+            "1", "0", "-"
+        ]
+
+        # Exact match check
+        if text in common_units:
+            return True
+
+        # Pattern-based checks
+        import re
+
+        # Mathematical expressions that look like units
+        if re.match(r'^[\d.]+[a-zA-Z]+$', text):  # Like "10m", "2.5kg"
+            return True
+
+        # Single character units (many Japanese units are single characters)
+        if len(text) == 1 and re.match(r'[個本台基機枚組孔穴口回日人名社件箇]', text):
+            return True
+
+        # Units with numeric prefixes
+        if re.match(r'^\d+[式個本台基機枚組孔穴口回日人名社件箇]$', text):
+            return True
+
+        return False
+
+    def _is_likely_specification_notes(self, text: str) -> bool:
+        """
+        Check if text looks like specification/notes rather than an item name.
+        This prevents notes like "A：1名､B：1名" from being concatenated to item names.
+        """
+        if not text or not text.strip():
+            return False
+
+        text = text.strip()
+
+        import re
+
+        # Pattern 1: Contains colons and commas with numbers (specification format)
+        # Examples: "A：1名､B：1名", "A:1人,B:2人", "タイプA：5個､タイプB：3個"
+        if re.search(r'[A-Za-z][:：]\d+[名人個本台]', text):
+            return True
+
+        # Pattern 2: Multiple comma-separated items with quantities
+        # Examples: "1名､2名", "A型､B型", "10個､20個"
+        if ',' in text or '､' in text:
+            parts = re.split(r'[,､]', text)
+            if len(parts) >= 2:
+                # Check if parts contain quantity-like patterns
+                quantity_parts = 0
+                for part in parts:
+                    part = part.strip()
+                    if re.search(r'\d+[名人個本台基機枚組]', part):
+                        quantity_parts += 1
+                # If most parts have quantities, it's likely specifications
+                if quantity_parts >= len(parts) / 2:
+                    return True
+
+        # Pattern 3: Contains parentheses with specifications
+        # Examples: "(A：1名)", "（詳細：10個）"
+        if re.search(r'[（(][^)）]*[:：]\d+[名人個本台][)）]', text):
+            return True
+
+        # Pattern 4: Contains specific specification keywords
+        specification_keywords = [
+            "タイプ", "型", "種類", "仕様", "規格", "詳細", "内訳", "明細",
+            "A:", "B:", "C:", "A：", "B：", "C：",
+            "1名", "2名", "3名", "4名", "5名",  # Common person counts
+            "1人", "2人", "3人", "4人", "5人"   # Alternative person counts
+        ]
+
+        for keyword in specification_keywords:
+            if keyword in text:
+                return True
+
+        # Pattern 5: Looks like enumeration (A, B, C with details)
+        if re.search(r'^[A-Z][：:][^A-Z]*[､,][A-Z][：:]', text):
+            return True
+
+        return False
+
+    def _is_detailed_specification(self, text: str) -> bool:
+        """
+        Check if text looks like detailed specifications that should be treated as completion data
+        rather than a new item name. This is specifically for the row spanning issue.
+
+        Examples:
+        - "1部材当り平均質量G≦20kg" (weight specification)
+        - "1構造物当り修復延べ体積:0.17m3,材料種類:ﾎﾟﾘﾏｰｾﾒﾝﾄﾓﾙﾀﾙ,鉄筋ｹﾚﾝ･鉄筋防錆処理:有り"
+        - "安全ﾈｯﾄ:有り"
+        - "塗装種別:有機ｼﾞﾝｸﾘｯﾁﾍﾟｲﾝﾄ(1層) ｽﾌﾟﾚｰ,塗装箇所:桁等,塗装回数:1回"
+        """
+        if not text or not text.strip():
+            return False
+
+        text = text.strip()
+
+        import re
+
+        # Pattern 1: Technical specifications with measurements and conditions
+        # Examples: "1部材当り平均質量G≦20kg", "1構造物当り修復延べ体積:0.17m3"
+        if re.search(r'\d+[部材構造物][当り]+.*[:：].*[\d.]+[a-zA-Z0-9]+', text):
+            return True
+
+        # Pattern 2: Contains technical symbols and measurements
+        # Examples: "G≦20kg", "φ25mm", "H=1500", "R=2mm"
+        if re.search(r'[G≦≧≤≥φΦH=L=W=R=][\d.]+[a-zA-Z]+', text):
+            return True
+
+        # Pattern 3: Complex specifications with multiple technical terms separated by commas
+        # Examples: "材料種類:ﾎﾟﾘﾏｰｾﾒﾝﾄﾓﾙﾀﾙ,鉄筋ｹﾚﾝ･鉄筋防錆処理:有り"
+        if ',' in text and ':' in text:
+            parts = text.split(',')
+            technical_parts = 0
+            for part in parts:
+                if ':' in part or '：' in part:
+                    technical_parts += 1
+            # If most parts contain technical details, it's a specification
+            if technical_parts >= len(parts) / 2:
+                return True
+
+        # Pattern 4: Safety or condition specifications
+        # Examples: "安全ﾈｯﾄ:有り", "防錆処理:有り", "ｹﾚﾝ:無し"
+        if re.search(r'[安全防錆処理ｹﾚﾝﾈｯﾄ].*[:：][有無]り?', text):
+            return True
+
+        # Pattern 5: Painting/coating specifications (for 下塗ﾄﾗｽ部 etc.)
+        # Examples: "塗装種別:有機ｼﾞﾝｸﾘｯﾁﾍﾟｲﾝﾄ(1層) ｽﾌﾟﾚｰ,塗装箇所:桁等,塗装回数:1回"
+        if re.search(r'塗装[種別箇所回数][:：]', text):
+            return True
+
+        # Pattern 6: Technical specifications with parentheses and layers
+        # Examples: "(1層)", "(2層)", "弱溶剤形変性ｴﾎﾟｷｼ樹脂塗料(2層)"
+        if re.search(r'[(（]\d+層[)）]', text) or '樹脂塗料' in text or 'ｽﾌﾟﾚｰ' in text:
+            return True
+
+        # Pattern 7: Very long descriptive specifications (over 20 characters with technical terms)
+        if len(text) > 20 and any(term in text for term in [
+            "当り", "平均", "質量", "体積", "材料", "種類", "処理", "仕様", "規格",
+            "ﾎﾟﾘﾏｰ", "ｾﾒﾝﾄ", "ﾓﾙﾀﾙ", "鉄筋", "ｹﾚﾝ", "防錆", "ﾈｯﾄ", "塗装", "塗料",
+            "弱溶剤", "ふっ素", "淡彩", "有機", "変性", "ｴﾎﾟｷｼ"
+        ]):
+            return True
+
+        # Pattern 8: Contains specific measurement formats
+        # Examples: "L100×100×10×160(SS400)", "M22×55(S10T)"
+        if re.search(r'[LM]\d+×\d+', text) or re.search(r'\([A-Z0-9]+\)$', text):
+            return True
+
+        return False
+
+    def _is_likely_table_number_or_structural_element(self, row: pd.Series, col_mapping: Dict[str, int],
+                                                      item_name: str, unit: str, quantity: float) -> bool:
+        """
+        Check if this row is likely a table number or structural element that should be ignored.
+
+        Args:
+            row: The pandas Series representing the row
+            col_mapping: Column mapping dictionary
+            item_name: Extracted item name (if any)
+            unit: Extracted unit (if any)
+            quantity: Extracted quantity
+
+        Returns:
+            True if this looks like a table number/structural element to ignore
+        """
+        # Criteria 1: Small integer quantity (1-10) with no item name or unit
+        if (quantity <= 10 and quantity == int(quantity) and
+                not item_name and not unit):
+            logger.debug(
+                f"Detected possible table number: quantity={quantity}, no item/unit")
+            return True
+
+        # Criteria 2: Check if the row only contains the quantity and nothing else meaningful
+        meaningful_cells = 0
+        for col_idx, cell_value in enumerate(row):
+            if pd.notna(cell_value):
+                str_value = str(cell_value).strip()
+                if str_value and str_value not in ['', '0', '0.0']:
+                    # Don't count the quantity cell itself
+                    if not (str_value == str(quantity) or str_value == str(int(quantity))):
+                        meaningful_cells += 1
+
+        # If there are very few meaningful cells (≤1), it's likely structural
+        if meaningful_cells <= 1:
+            logger.debug(
+                f"Detected structural element: quantity={quantity}, meaningful_cells={meaningful_cells}")
+            return True
+
+        # Criteria 3: Check for common table number patterns
+        # Table numbers are often in the first few columns
+        first_few_values = []
+        for i in range(min(5, len(row))):
+            if pd.notna(row.iloc[i]):
+                first_few_values.append(str(row.iloc[i]).strip())
+
+        # If the row starts with just a number and has minimal other data
+        if (len(first_few_values) <= 2 and
+            len(first_few_values) > 0 and
+            first_few_values[0].isdigit() and
+                int(first_few_values[0]) <= 20):
+            logger.debug(
+                f"Detected table number pattern: first_values={first_few_values}")
+            return True
+
+        return False
+
+    def _is_complete_item_name(self, text: str) -> bool:
+        """
+        Check if text appears to be a complete item name that should NOT be concatenated.
+        Complete items contain specifications, measurements, or are self-contained descriptions.
+        """
+        if not text or not text.strip():
+            return False
+
+        text = text.strip()
+
+        import re
+
+        # Pattern 1: Contains measurements or specifications with equals sign
+        # Examples: "L=58.9km", "H=2.5m", "W=1000mm"
+        if re.search(r'[LHWlhw]=[\d.]+[a-zA-Z]+', text):
+            return True
+
+        # Pattern 2: Contains specific measurements
+        # Examples: "58.9km", "2.5m", "1000mm" (when part of item name)
+        if re.search(r'\d+\.?\d*[kmcm]+', text):
+            return True
+
+        # Pattern 3: Contains material specifications
+        # Examples: "φ25mm", "Φ300", "直径25mm"
+        if re.search(r'[φΦ直径]\d+', text):
+            return True
+
+        # Pattern 4: Contains complete descriptive phrases
+        # Examples: "運搬費" (transport cost), "材料費" (material cost), "工事費" (construction cost)
+        if any(keyword in text for keyword in ["費", "工事", "材料", "運搬", "設置", "撤去", "組立", "解体"]):
+            return True
+
+        # Pattern 5: Contains specific construction item types that are typically complete
+        # Examples: "ガードレール", "フェンス", "標識", "舗装"
+        complete_item_types = [
+            "ガードレール", "ガード", "フェンス", "標識", "舗装", "コンクリート",
+            "アスファルト", "鉄筋", "型枠", "足場", "支保工", "土留", "排水",
+            "配管", "電線", "照明", "信号", "看板"
+        ]
+
+        for item_type in complete_item_types:
+            if item_type in text:
+                return True
+
+        # Pattern 6: Long descriptive names (usually complete)
+        # Items longer than 8 characters are usually complete descriptions
+        if len(text) > 8:
+            return True
+
+        return False
+
+    def _extract_item_name(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
+        """
+        Extract item name from core columns: 費目/工種/種別/細別/規格
+        ENHANCED: Also checks hierarchical columns where item names might be stored
+        """
+        # Core item name columns in priority order
+        item_name_columns = [
+            "工事区分・工種・種別・細別",  # Main work classification
+            "費目",                      # Cost item
+            "工種",                      # Work type
+            "種別",                      # Category
+            "細別",                      # Subcategory
+            "規格"                       # Specification
+        ]
+
+        logger.debug(
+            f"Extracting item name from row. Col mapping keys: {list(col_mapping.keys())}")
+
+        # First try core columns
+        for col_name in item_name_columns:
+            if col_name in col_mapping:
+                col_idx = col_mapping[col_name]
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    # Enhanced check for meaningful content - exclude various types of spaces and empty patterns
+                    if (value and value not in ["", "None", "nan", "0"] and
+                            not all(c in " 　\t\n\r" for c in value)):  # Exclude full-width spaces and other whitespace
+                        logger.debug(
+                            f"Found item name in column '{col_name}': '{value}'")
+                        return value
+
+        # If not found in core columns, try hierarchical columns
+        # (Many Japanese Excel files store item names in these columns)
+        hierarchical_columns = ["hierarchical_item_1", "hierarchical_item_2",
+                                "hierarchical_item_3", "hierarchical_item_4", "hierarchical_item_5"]
+
+        for col_name in hierarchical_columns:
+            if col_name in col_mapping:
+                col_idx = col_mapping[col_name]
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    # Enhanced check for meaningful content and ensure it's not a unit
+                    if (value and value not in ["", "None", "nan", "0"] and
+                        not all(c in " 　\t\n\r" for c in value) and
+                            not self._is_likely_unit(value)):
+                        logger.debug(
+                            f"Found item name in hierarchical column '{col_name}': '{value}'")
+                        return value
+
+        logger.debug("No item name found, returning empty string")
+        return ""
+
+    def _extract_unit(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
+        """
+        Extract unit from unit column - handles Japanese Excel patterns where unit might be in different cells
+        """
+        unit_columns = ["単位", "Unit", "units"]
+
+        logger.debug(
+            f"Extracting unit from row. Col mapping keys: {list(col_mapping.keys())}")
+
+        # First try the mapped unit column
+        for col_name in unit_columns:
+            if col_name in col_mapping:
+                col_idx = col_mapping[col_name]
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    # Include spaces
+                    if value and value not in ["", "None", "nan", "0", " ", "　"]:
+                        logger.debug(
+                            f"Found unit in column '{col_name}': '{value}'")
+                        return value
+
+        # Japanese Excel pattern: unit might be in hierarchical columns (especially column 3)
+        # Look in hierarchical columns for units like "式", "m3", etc.
+        for col_name, col_idx in col_mapping.items():
+            if "hierarchical_item" in col_name:
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    if value and self._is_likely_unit(value):
+                        logger.debug(
+                            f"Found unit in hierarchical column '{col_name}': '{value}'")
+                        return value
+
+        logger.debug("No unit found, returning empty string")
+        return ""
+
+    def _extract_quantity_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> float:
+        """
+        Extract quantity from quantity column - handles Japanese formatting with spaces
+        """
+        # All possible quantity column variations including full-width spaces
+        quantity_columns = [
+            "数量",        # Standard without space
+            "数　量",      # With full-width space
+            "数 量",       # With regular space
+            "Quantity",
+            "Qty",
+            "Count"
+        ]
+
+        logger.debug(
+            f"Extracting quantity from row. Col mapping keys: {list(col_mapping.keys())}")
+
+        for col_name in quantity_columns:
+            if col_name in col_mapping:
+                col_idx = col_mapping[col_name]
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    cell_value = row.iloc[col_idx]
+                    quantity = self._extract_quantity(cell_value)
+                    logger.debug(
+                        f"Found quantity column '{col_name}' at index {col_idx}, value: '{cell_value}' -> {quantity}")
+                    return quantity
+
+        # If no exact match found, try to find it by searching for 数 and 量 characters
+        for col_name, col_idx in col_mapping.items():
+            if "数" in col_name and "量" in col_name:  # Look for any column containing 数 and 量
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    cell_value = row.iloc[col_idx]
+                    quantity = self._extract_quantity(cell_value)
+                    logger.debug(
+                        f"Found quantity column via character search '{col_name}' at index {col_idx}, value: '{cell_value}' -> {quantity}")
+                    return quantity
+
+        logger.debug("No quantity column found, returning 0.0")
+        return 0.0
+
+    def _combine_with_previous_item(self, existing_items: List[TenderItem],
+                                    current_item_name: str, unit: str, quantity: float) -> str:
+        """
+        Combine current row data with previous incomplete item
+        """
+        if not existing_items:
+            logger.warning("Excel: No previous item to combine with")
+            return "skipped"
+
+        last_item = existing_items[-1]
+
+        # Combine item names: previous + current
+        combined_name = f"{last_item.item_key} {current_item_name}".strip()
+
+        # Update the last item
+        last_item.item_key = combined_name
+        last_item.quantity = quantity
+        last_item.raw_fields["工事区分・工種・種別・細別"] = combined_name
+        last_item.raw_fields["単位"] = unit
+
+        logger.info(
+            f"Excel: Combined items: '{last_item.item_key}' with {quantity} {unit}")
+
+        return "merged"
+
+    def _complete_with_unit_quantity(self, existing_items: List[TenderItem],
+                                     unit: str, quantity: float) -> str:
+        """
+        Complete previous incomplete item with unit and quantity only
+        """
+        if not existing_items:
+            logger.warning("Excel: No previous item to complete")
+            return "skipped"
+
+        last_item = existing_items[-1]
+
+        # Update with unit and quantity
+        last_item.quantity = quantity
+        last_item.raw_fields["単位"] = unit
+
+        logger.info(
+            f"Excel: Completed item '{last_item.item_key}' with {quantity} {unit}")
+
+        return "merged"
+
+    def _complete_with_combined_name_unit_quantity(self, existing_items: List[TenderItem],
+                                                   detailed_name: str, unit: str, quantity: float) -> str:
+        """
+        Complete previous incomplete item by combining names and adding unit and quantity
+        """
+        if not existing_items:
+            logger.warning(
+                "Excel: No previous item to complete with combined name")
+            return "skipped"
+
+        last_item = existing_items[-1]
+
+        # Combine the base item name with the detailed specification
+        original_name = last_item.item_key
+        combined_name = f"{original_name} {detailed_name}".strip()
+
+        # Update the item with combined name, unit and quantity
+        last_item.item_key = combined_name
+        last_item.quantity = quantity
+        last_item.raw_fields["工事区分・工種・種別・細別"] = combined_name
+        last_item.raw_fields["単位"] = unit
+
+        logger.info(
+            f"Excel: Completed item with combined name '{combined_name}' ({quantity} {unit})")
+
+        return "merged"
 
     def _process_single_row(self, row: pd.Series, col_mapping: Dict[str, int],
                             sheet_name: str, sheet_idx: int, row_idx: int) -> Optional[TenderItem]:
@@ -1357,6 +1869,7 @@ class ExcelParser:
     def extract_items(self, excel_path: str) -> List[TenderItem]:
         """
         Extract items from Excel file and convert to TenderItem objects.
+        UPDATED: Now uses the new subtable-based processing with row spanning logic.
         """
         items = []
         excel_file = None
@@ -1367,15 +1880,15 @@ class ExcelParser:
             print(
                 f"Processing Excel file with sheets: {excel_file.sheet_names}")
 
-            # Process each sheet
-            for sheet_name in excel_file.sheet_names:
+            # Process each sheet using NEW subtable-based approach with row spanning
+            for sheet_idx, sheet_name in enumerate(excel_file.sheet_names):
                 try:
-                    df = pd.read_excel(
-                        excel_file, sheet_name=sheet_name, header=None)
                     print(
-                        f"Processing sheet '{sheet_name}' with shape {df.shape}")
+                        f"Processing sheet '{sheet_name}' with shape {pd.read_excel(excel_file, sheet_name=sheet_name, header=None).shape}")
 
-                    sheet_items = self._process_sheet(df, sheet_name)
+                    # Use NEW processing method that includes row spanning logic
+                    sheet_items = self._process_single_sheet(
+                        excel_file, sheet_name, sheet_idx)
                     items.extend(sheet_items)
 
                     print(

@@ -102,86 +102,49 @@ class Normalizer:
 
     def are_items_significantly_different(self, text1: str, text2: str) -> bool:
         """
-        Check if two items are significantly different and should not be considered matches.
-        Enhanced to handle PDF (detailed) vs Excel (base name) matching patterns.
+        STRICT EXACT MATCHING: Check if two items are different using exact word matching.
+        Items are considered the same ONLY if they match exactly after whitespace normalization.
+        This ensures precise identification for construction documents.
         """
         if not text1 or not text2:
             return True
 
         import re
 
-        # STEP 0: Extract base item names by removing "+ specification" parts
-        # This handles cases like "防護柵設置 + 歩行者自転車柵兼用,B種,H=950mm" vs "防護柵設置"
-        def extract_base_name(text):
-            # Remove everything after " + " to get base item name
-            base = re.split(r'\s*\+\s*', text)[0].strip()
-            return self._normalize_text(base)
+        def normalize_for_exact_match(text):
+            """
+            Normalize text for exact matching by:
+            1. Converting full-width to half-width
+            2. Removing all whitespace
+            3. Converting to lowercase
+            4. Preserving all meaningful characters
+            """
+            if not text:
+                return ""
 
-        base1 = extract_base_name(text1)
-        base2 = extract_base_name(text2)
+            # Convert to string if not already
+            text = str(text)
 
-        # If base names match, these are likely the same item (PDF detailed vs Excel base)
-        if base1 == base2 and base1:
-            return False
+            # Convert full-width to half-width (for numbers and basic ASCII)
+            normalized = jaconv.z2h(text, kana=False, digit=True, ascii=True)
 
-        # If base names are very similar (fuzzy match), they're likely the same item
-        if base1 and base2:
-            # Simple character-based similarity for base names
-            common_chars = sum(1 for c in base1 if c in base2)
-            max_length = max(len(base1), len(base2))
-            similarity = common_chars / max_length if max_length > 0 else 0.0
+            # Remove all types of whitespace (spaces, tabs, full-width spaces, etc.)
+            normalized = re.sub(r'[\s　\u3000\t\n\r]+', '', normalized)
 
-            # If base names are >85% similar, consider them the same item
-            if similarity > 0.85:
-                return False
+            # Convert to lowercase for case-insensitive comparison
+            normalized = normalized.lower()
 
-        # STEP 1: Normalize both full texts for detailed comparison
-        norm1 = self._normalize_text(text1)
-        norm2 = self._normalize_text(text2)
+            return normalized.strip()
 
-        # STEP 2: Check for specific patterns that indicate different items
+        # Normalize both texts for exact comparison
+        norm1 = normalize_for_exact_match(text1)
+        norm2 = normalize_for_exact_match(text2)
 
-        # 2a. Different numerical suffixes (e.g., ベンチフリュームボックス vs ベンチフリュームボックス２)
-        # Extract base names (without numbers)
-        base_no_nums1 = re.sub(r'[０-９0-9]+', '', norm1)
-        base_no_nums2 = re.sub(r'[０-９0-9]+', '', norm2)
-
-        # If base names are the same but original texts have different numbers, they're different items
-        if base_no_nums1 == base_no_nums2 and base_no_nums1:
-            # Extract all numbers from both texts
-            numbers1 = re.findall(r'[０-９0-9]+', norm1)
-            numbers2 = re.findall(r'[０-９0-9]+', norm2)
-
-            # If they have different numbers, consider them different
-            if numbers1 != numbers2:
-                return True
-
-        # 2b. Different multiplication factors (e.g., 800×590×2000 vs 800×590×2000✕2)
-        # Check for ✕ followed by numbers
-        mult_pattern1 = re.search(r'✕([０-９0-9]+)', norm1)
-        mult_pattern2 = re.search(r'✕([０-９0-9]+)', norm2)
-
-        # If one has multiplication factor and other doesn't, they're different
-        if bool(mult_pattern1) != bool(mult_pattern2):
-            return True
-
-        # If both have multiplication factors but different values, they're different
-        if mult_pattern1 and mult_pattern2:
-            if mult_pattern1.group(1) != mult_pattern2.group(1):
-                return True
-
-        # STEP 3: Significant length difference (but more lenient for base name matches)
-        # Only apply strict length checking if base names don't match at all
-        if len(norm1) > 0 and len(norm2) > 0:
-            length_ratio = abs(len(norm1) - len(norm2)) / \
-                max(len(norm1), len(norm2))
-
-            # If base names are completely different AND length difference >50%, consider different
-            # (More lenient than the original 30% to allow PDF detailed vs Excel base matching)
-            if length_ratio > 0.5:
-                return True
-
-        return False
+        # EXACT MATCH: Items are the same ONLY if they match exactly
+        if norm1 == norm2:
+            return False  # Not significantly different - they're the same
+        else:
+            return True   # Significantly different - they're different items
 
     def calculate_similarity_score(self, key1: str, key2: str) -> float:
         """
