@@ -249,7 +249,9 @@ async def compare_tender_files_missing_only(
                 {
                     "item_key": item.item_key,
                     "raw_fields": item.raw_fields,
-                    "quantity": item.quantity
+                    "quantity": item.quantity,
+                    "unit": item.unit,
+                    "page_number": item.page_number
                 }
                 for item in missing_items
             ],
@@ -258,7 +260,9 @@ async def compare_tender_files_missing_only(
                     "item_key": item.item_key,
                     "raw_fields": item.raw_fields,
                     "quantity": item.quantity,
-                    "source": item.source
+                    "unit": item.unit,
+                    "source": item.source,
+                    "page_number": item.page_number
                 }
                 for item in pdf_items
             ],
@@ -267,7 +271,9 @@ async def compare_tender_files_missing_only(
                     "item_key": item.item_key,
                     "raw_fields": item.raw_fields,
                     "quantity": item.quantity,
-                    "source": item.source
+                    "unit": item.unit,
+                    "source": item.source,
+                    "page_number": item.page_number
                 }
                 for item in excel_items
             ]
@@ -363,6 +369,8 @@ async def compare_tender_files_mismatches_only(
         matcher = Matcher()
         mismatched_results = matcher.get_mismatched_items_only(
             pdf_items, excel_items)
+        unit_mismatched_results = matcher.get_unit_mismatched_items_only(
+            pdf_items, excel_items)
 
         # Return simplified response
         return {
@@ -374,12 +382,16 @@ async def compare_tender_files_mismatches_only(
                     "pdf_item": {
                         "item_key": result.pdf_item.item_key,
                         "quantity": result.pdf_item.quantity,
-                        "raw_fields": result.pdf_item.raw_fields
+                        "unit": result.pdf_item.unit,
+                        "raw_fields": result.pdf_item.raw_fields,
+                        "page_number": result.pdf_item.page_number
                     },
                     "excel_item": {
                         "item_key": result.excel_item.item_key,
                         "quantity": result.excel_item.quantity,
-                        "raw_fields": result.excel_item.raw_fields
+                        "unit": result.excel_item.unit,
+                        "raw_fields": result.excel_item.raw_fields,
+                        "page_number": result.excel_item.page_number
                     },
                     "quantity_difference": result.quantity_difference,
                     "match_confidence": result.match_confidence
@@ -391,7 +403,9 @@ async def compare_tender_files_mismatches_only(
                     "item_key": item.item_key,
                     "raw_fields": item.raw_fields,
                     "quantity": item.quantity,
-                    "source": item.source
+                    "unit": item.unit,
+                    "source": item.source,
+                    "page_number": item.page_number
                 }
                 for item in pdf_items
             ],
@@ -400,7 +414,9 @@ async def compare_tender_files_mismatches_only(
                     "item_key": item.item_key,
                     "raw_fields": item.raw_fields,
                     "quantity": item.quantity,
-                    "source": item.source
+                    "unit": item.unit,
+                    "source": item.source,
+                    "page_number": item.page_number
                 }
                 for item in excel_items
             ]
@@ -409,6 +425,146 @@ async def compare_tender_files_mismatches_only(
     except Exception as e:
         logger.error(
             f"Error in mismatches comparison: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Processing error: {str(e)}")
+
+    finally:
+        # Cleanup
+        try:
+            if pdf_fd is not None:
+                os.close(pdf_fd)
+        except Exception:
+            pass
+
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.unlink(pdf_path)
+            except Exception:
+                pass
+
+        gc.collect()
+
+
+@router.post("/compare-unit-mismatches-only")
+async def compare_tender_files_unit_mismatches_only(
+    pdf_file: UploadFile = File(...),
+    excel_file: UploadFile = File(...),
+    start_page: Optional[int] = Form(None),
+    end_page: Optional[int] = Form(None),
+    sheet_name: Optional[str] = Form(None)
+):
+    """
+    Compare tender files and return only the unit mismatches.
+    Optimized endpoint for specific use case.
+
+    Args:
+        pdf_file: PDF tender document
+        excel_file: Excel proposal document
+        start_page: Starting page number for PDF extraction (optional)
+        end_page: Ending page number for PDF extraction (optional)
+        sheet_name: Specific Excel sheet name to extract from (optional)
+    """
+    logger.info("=== STARTING UNIT MISMATCHES COMPARISON ===")
+    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
+
+    # Same file processing as main endpoint
+    if not pdf_file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="PDF file required")
+    if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=400, detail="Excel file required")
+
+    # Validate page range
+    if start_page is not None and start_page < 1:
+        raise HTTPException(status_code=400, detail="Start page must be >= 1")
+    if end_page is not None and end_page < 1:
+        raise HTTPException(status_code=400, detail="End page must be >= 1")
+    if start_page is not None and end_page is not None and start_page > end_page:
+        raise HTTPException(
+            status_code=400, detail="Start page cannot be greater than end page")
+
+    pdf_fd = None
+    pdf_path = None
+
+    try:
+        # Process files
+        pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='tender_')
+        pdf_content = await pdf_file.read()
+
+        with os.fdopen(pdf_fd, 'wb') as f:
+            f.write(pdf_content)
+        pdf_fd = None
+
+        excel_content = await excel_file.read()
+        excel_buffer = BytesIO(excel_content)
+
+        # Parse files with parameters
+        pdf_parser = PDFParser()
+        excel_parser = ExcelParser()
+
+        pdf_items = pdf_parser.extract_tables_with_range(
+            pdf_path, start_page, end_page)
+        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+            excel_buffer, sheet_name)
+        excel_buffer.close()
+
+        # Get only unit mismatched items
+        matcher = Matcher()
+        unit_mismatched_results = matcher.get_unit_mismatched_items_only(
+            pdf_items, excel_items)
+
+        # Return simplified response
+        return {
+            "total_pdf_items": len(pdf_items),
+            "total_excel_items": len(excel_items),
+            "unit_mismatches_count": len(unit_mismatched_results),
+            "unit_mismatches": [
+                {
+                    "pdf_item": {
+                        "item_key": result.pdf_item.item_key,
+                        "quantity": result.pdf_item.quantity,
+                        "unit": result.pdf_item.unit,
+                        "raw_fields": result.pdf_item.raw_fields,
+                        "page_number": result.pdf_item.page_number
+                    },
+                    "excel_item": {
+                        "item_key": result.excel_item.item_key,
+                        "quantity": result.excel_item.quantity,
+                        "unit": result.excel_item.unit,
+                        "raw_fields": result.excel_item.raw_fields,
+                        "page_number": result.excel_item.page_number
+                    },
+                    "match_confidence": result.match_confidence
+                }
+                for result in unit_mismatched_results
+            ],
+            "pdf_extracted_items": [
+                {
+                    "item_key": item.item_key,
+                    "raw_fields": item.raw_fields,
+                    "quantity": item.quantity,
+                    "unit": item.unit,
+                    "source": item.source,
+                    "page_number": item.page_number
+                }
+                for item in pdf_items
+            ],
+            "excel_extracted_items": [
+                {
+                    "item_key": item.item_key,
+                    "raw_fields": item.raw_fields,
+                    "quantity": item.quantity,
+                    "unit": item.unit,
+                    "source": item.source,
+                    "page_number": item.page_number
+                }
+                for item in excel_items
+            ]
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Error in unit mismatches comparison: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Processing error: {str(e)}")
 

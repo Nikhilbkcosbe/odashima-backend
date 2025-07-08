@@ -170,32 +170,80 @@ class Matcher:
 
         return None
 
+    def _normalize_unit(self, unit: str) -> str:
+        """
+        Normalize unit values for comparison.
+        Handles None values and common unit variations.
+        """
+        if not unit:
+            return ""
+
+        # Strip whitespace and convert to lowercase
+        normalized = str(unit).strip().lower()
+
+        # Handle common variations
+        unit_mappings = {
+            "m2": "㎡",
+            "m3": "㎥",
+            "m²": "㎡",
+            "m³": "㎥",
+            "平方メートル": "㎡",
+            "立方メートル": "㎥",
+            "メートル": "m",
+            "センチメートル": "cm",
+            "ミリメートル": "mm",
+            "キログラム": "kg",
+            "グラム": "g",
+            "リットル": "l",
+            "ℓ": "l"
+        }
+
+        return unit_mappings.get(normalized, normalized)
+
     def _create_comparison_result(self, pdf_item: TenderItem, excel_item: TenderItem,
                                   confidence: float, match_type: str) -> ComparisonResult:
         """
-        Create a comparison result for matched items, checking for quantity differences.
+        Create a comparison result for matched items, checking for quantity and unit differences.
         """
         # Check quantity difference
         quantity_tolerance = 0.001
         quantity_diff = excel_item.quantity - pdf_item.quantity
+        has_quantity_mismatch = abs(quantity_diff) >= quantity_tolerance
 
-        if abs(quantity_diff) < quantity_tolerance:
-            status = "OK"
-            actual_quantity_diff = None
-            logger.debug(
-                f"Perfect match: {pdf_item.item_key[:30]}... (quantities match)")
-        else:
+        # Check unit difference
+        pdf_unit = self._normalize_unit(pdf_item.unit)
+        excel_unit = self._normalize_unit(excel_item.unit)
+        has_unit_mismatch = pdf_unit != excel_unit
+
+        # Determine status based on mismatches
+        if has_quantity_mismatch and has_unit_mismatch:
+            status = "QUANTITY_MISMATCH"  # Quantity mismatch takes priority
+            actual_quantity_diff = quantity_diff
+            logger.info(f"Quantity & Unit mismatch: {pdf_item.item_key[:30]}... "
+                        f"(PDF: {pdf_item.quantity} {pdf_item.unit}, Excel: {excel_item.quantity} {excel_item.unit})")
+        elif has_quantity_mismatch:
             status = "QUANTITY_MISMATCH"
             actual_quantity_diff = quantity_diff
             logger.info(f"Quantity mismatch: {pdf_item.item_key[:30]}... "
                         f"(PDF: {pdf_item.quantity}, Excel: {excel_item.quantity}, Diff: {quantity_diff})")
+        elif has_unit_mismatch:
+            status = "UNIT_MISMATCH"
+            actual_quantity_diff = None
+            logger.info(f"Unit mismatch: {pdf_item.item_key[:30]}... "
+                        f"(PDF: '{pdf_item.unit}', Excel: '{excel_item.unit}')")
+        else:
+            status = "OK"
+            actual_quantity_diff = None
+            logger.debug(
+                f"Perfect match: {pdf_item.item_key[:30]}... (quantities and units match)")
 
         return ComparisonResult(
             status=status,
             pdf_item=pdf_item,
             excel_item=excel_item,
             match_confidence=confidence,
-            quantity_difference=actual_quantity_diff
+            quantity_difference=actual_quantity_diff,
+            unit_mismatch=has_unit_mismatch
         )
 
     def _find_extra_excel_items(self, excel_normalized: Dict[str, TenderItem],
@@ -227,6 +275,8 @@ class Matcher:
         matched_items = sum(1 for r in results if r.status == "OK")
         quantity_mismatches = sum(
             1 for r in results if r.status == "QUANTITY_MISMATCH")
+        unit_mismatches = sum(
+            1 for r in results if r.status == "UNIT_MISMATCH")
         missing_items = sum(1 for r in results if r.status == "MISSING")
         extra_items = sum(1 for r in results if r.status == "EXTRA")
 
@@ -234,6 +284,7 @@ class Matcher:
             total_items=total_items,
             matched_items=matched_items,
             quantity_mismatches=quantity_mismatches,
+            unit_mismatches=unit_mismatches,
             missing_items=missing_items,
             extra_items=extra_items,
             results=results
@@ -247,6 +298,7 @@ class Matcher:
         logger.info(f"Total items processed: {summary.total_items}")
         logger.info(f"Perfect matches: {summary.matched_items}")
         logger.info(f"Quantity mismatches: {summary.quantity_mismatches}")
+        logger.info(f"Unit mismatches: {summary.unit_mismatches}")
         logger.info(f"Missing in Excel: {summary.missing_items}")
         logger.info(f"Extra in Excel: {summary.extra_items}")
 
@@ -274,6 +326,19 @@ class Matcher:
             if summary.quantity_mismatches > 5:
                 logger.warning(
                     f"... and {summary.quantity_mismatches - 5} more quantity mismatches")
+
+        # Log details of unit mismatches
+        if summary.unit_mismatches > 0:
+            logger.warning("=== UNIT MISMATCHES ===")
+            unit_mismatch_count = 0
+            for result in summary.results:
+                if result.status == "UNIT_MISMATCH" and unit_mismatch_count < 5:  # Log first 5
+                    logger.warning(f"Unit diff: {result.pdf_item.item_key[:30]}... "
+                                   f"(PDF: '{result.pdf_item.unit}', Excel: '{result.excel_item.unit}')")
+                    unit_mismatch_count += 1
+            if summary.unit_mismatches > 5:
+                logger.warning(
+                    f"... and {summary.unit_mismatches - 5} more unit mismatches")
 
         logger.info("=== END SUMMARY ===")
 
@@ -308,3 +373,19 @@ class Matcher:
 
         logger.info(f"Found {len(mismatched_results)} quantity mismatches")
         return mismatched_results
+
+    def get_unit_mismatched_items_only(self, pdf_items: List[TenderItem], excel_items: List[TenderItem]) -> List[ComparisonResult]:
+        """
+        Quick method to get only the unit mismatched items.
+        """
+        logger.info("Getting unit mismatched items only...")
+
+        comparison_summary = self.compare_items(pdf_items, excel_items)
+
+        unit_mismatched_results = []
+        for result in comparison_summary.results:
+            if result.status == "UNIT_MISMATCH":
+                unit_mismatched_results.append(result)
+
+        logger.info(f"Found {len(unit_mismatched_results)} unit mismatches")
+        return unit_mismatched_results

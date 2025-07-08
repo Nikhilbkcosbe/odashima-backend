@@ -212,6 +212,7 @@ class PDFParser:
         # Extract fields from row
         raw_fields = {}
         quantity = 0.0
+        unit = None
 
         for col_name, col_idx in col_indices.items():
             if col_idx < len(row) and row[col_idx]:
@@ -219,6 +220,10 @@ class PDFParser:
                 if cell_value:
                     if col_name == "数量":
                         quantity = self._extract_quantity(cell_value)
+                    elif col_name == "単位":
+                        unit = cell_value
+                        # Also store in raw_fields for completion logic
+                        raw_fields[col_name] = cell_value
                     else:
                         raw_fields[col_name] = cell_value
 
@@ -241,7 +246,9 @@ class PDFParser:
                 item_key=item_key,
                 raw_fields=raw_fields,
                 quantity=0.0,  # Will be updated when quantity row is found
-                source="PDF"
+                unit=unit,
+                source="PDF",
+                page_number=page_num + 1  # Convert 0-based to 1-based page number
             )
 
         # Case 2: Row has quantity data but no item fields (completion row for spanning)
@@ -261,7 +268,9 @@ class PDFParser:
                 item_key=item_key,
                 raw_fields=raw_fields,
                 quantity=quantity,
-                source="PDF"
+                unit=unit,
+                source="PDF",
+                page_number=page_num + 1  # Convert 0-based to 1-based page number
             )
 
         # Case 4: Row has neither meaningful item fields nor quantity data
@@ -306,6 +315,12 @@ class PDFParser:
         # Update the last item with quantity and any additional fields
         old_quantity = last_item.quantity
         last_item.quantity = quantity
+
+        # Update unit if available in completion row
+        if "単位" in raw_fields and raw_fields["単位"] and raw_fields["単位"].strip():
+            last_item.unit = raw_fields["単位"].strip()
+            logger.debug(
+                f"PDF: Updated unit to '{last_item.unit}' for item '{last_item.item_key}'")
 
         # Merge additional fields (like unit) from the completion row
         for field_name, field_value in raw_fields.items():

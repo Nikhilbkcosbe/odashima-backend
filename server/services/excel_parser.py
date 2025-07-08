@@ -756,9 +756,10 @@ class ExcelParser:
         - Row with quantity but no item name → complete previous incomplete item
         - Row with both → complete item (or combine if previous incomplete)
         """
-        # Extract ONLY the 2 essential fields
+        # Extract ONLY the 3 essential fields
         item_name = self._extract_item_name_simple(row, col_mapping)
         quantity = self._extract_quantity_simple(row, col_mapping)
+        unit = self._extract_unit_simple(row, col_mapping)
 
         logger.info(
             f"Excel Row {row_idx}: RAW DATA: " +
@@ -766,7 +767,7 @@ class ExcelParser:
                 min(8, len(row))) if pd.notna(row.iloc[i]) and str(row.iloc[i]).strip()])
         )
         logger.info(
-            f"Excel Row {row_idx}: EXTRACTED: item='{item_name}', quantity={quantity}")
+            f"Excel Row {row_idx}: EXTRACTED: item='{item_name}', quantity={quantity}, unit='{unit}'")
 
         # ENHANCED: Check context before filtering - don't filter potential completion rows
         has_previous_incomplete = existing_items and existing_items[-1].quantity == 0
@@ -786,7 +787,9 @@ class ExcelParser:
                 item_key=item_name,
                 raw_fields=raw_fields,
                 quantity=0.0,
-                source="Excel"
+                unit=unit,
+                source="Excel",
+                page_number=None
             )
 
         # CASE 2: Row has item name + quantity → complete item (or combine with previous)
@@ -795,7 +798,7 @@ class ExcelParser:
             if existing_items and existing_items[-1].quantity == 0:
                 logger.info(
                     f"Excel Row {row_idx}: CASE 2A - Combining '{item_name}' with previous incomplete item")
-                return self._combine_with_previous_item_simple(existing_items, item_name, quantity)
+                return self._combine_with_previous_item_simple(existing_items, item_name, quantity, unit)
             else:
                 logger.info(
                     f"Excel Row {row_idx}: CASE 2B - Complete item: '{item_name}' {quantity}")
@@ -804,7 +807,9 @@ class ExcelParser:
                     item_key=item_name,
                     raw_fields=raw_fields,
                     quantity=quantity,
-                    source="Excel"
+                    unit=unit,
+                    source="Excel",
+                    page_number=None
                 )
 
         # CASE 3: Row has quantity but no item name → complete previous incomplete item
@@ -813,7 +818,7 @@ class ExcelParser:
             if existing_items and existing_items[-1].quantity == 0:
                 logger.info(
                     f"Excel Row {row_idx}: CASE 3 - Completing previous item with quantity {quantity}")
-                return self._complete_previous_item_simple(existing_items, quantity)
+                return self._complete_previous_item_simple(existing_items, quantity, unit)
             else:
                 logger.info(
                     f"Excel Row {row_idx}: CASE 3-SKIP - Quantity without item name and no previous incomplete item")
@@ -903,6 +908,41 @@ class ExcelParser:
 
         return ""
 
+    def _extract_unit_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
+        """
+        SIMPLIFIED: Extract unit focusing on the main unit column and hierarchical columns.
+        Looks for: 単位 and variations with spaces
+        """
+        # Priority 1: Main unit columns
+        unit_columns = [
+            "単位",        # Standard without space
+            "単　位",      # With full-width space
+            "単 位",       # With regular space
+            "Unit",
+            "units"
+        ]
+
+        for col_name in unit_columns:
+            if col_name in col_mapping:
+                col_idx = col_mapping[col_name]
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    if (value and value not in ["", "None", "nan", "0"] and
+                            not all(c in " 　\t\n\r" for c in value)):
+                        return value
+
+        # Priority 2: Check hierarchical columns where units might be stored
+        for col_name, col_idx in col_mapping.items():
+            if "hierarchical_item" in col_name:
+                if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
+                    value = str(row.iloc[col_idx]).strip()
+                    if (value and value not in ["", "None", "nan", "0"] and
+                        not all(c in " 　\t\n\r" for c in value) and
+                            self._is_likely_unit(value)):
+                        return value
+
+        return ""
+
     def _is_table_header_or_structural(self, row: pd.Series, item_name: str, quantity: float) -> bool:
         """
         SIMPLIFIED: Check if row is a table header or structural element to skip.
@@ -934,7 +974,7 @@ class ExcelParser:
         return False
 
     def _combine_with_previous_item_simple(self, existing_items: List[TenderItem],
-                                           current_item_name: str, quantity: float) -> str:
+                                           current_item_name: str, quantity: float, unit: str = "") -> str:
         """
         SIMPLIFIED: Combine current item name with previous incomplete item.
         """
@@ -949,13 +989,17 @@ class ExcelParser:
         last_item.quantity = quantity
         last_item.raw_fields["工事区分・工種・種別・細別"] = combined_name
 
+        # Update unit if provided
+        if unit and unit.strip():
+            last_item.unit = unit.strip()
+
         logger.info(
             f"Excel: Combined items -> '{combined_name}' with quantity {quantity}")
         return "merged"
 
-    def _complete_previous_item_simple(self, existing_items: List[TenderItem], quantity: float) -> str:
+    def _complete_previous_item_simple(self, existing_items: List[TenderItem], quantity: float, unit: str = "") -> str:
         """
-        SIMPLIFIED: Complete previous incomplete item with quantity only.
+        SIMPLIFIED: Complete previous incomplete item with quantity and unit.
         """
         if not existing_items:
             return "skipped"
@@ -963,8 +1007,15 @@ class ExcelParser:
         last_item = existing_items[-1]
         last_item.quantity = quantity
 
-        logger.info(
-            f"Excel: Completed item '{last_item.item_key}' with quantity {quantity}")
+        # Update unit if provided
+        if unit and unit.strip():
+            last_item.unit = unit.strip()
+            logger.info(
+                f"Excel: Completed item '{last_item.item_key}' with quantity {quantity} and unit '{unit}'")
+        else:
+            logger.info(
+                f"Excel: Completed item '{last_item.item_key}' with quantity {quantity}")
+
         return "merged"
 
     # REMOVED: Old complex row data completion method - replaced with simple approach
@@ -1033,6 +1084,12 @@ class ExcelParser:
         # Update the last item with quantity and any additional fields
         old_quantity = last_item.quantity
         last_item.quantity = quantity
+
+        # Update unit if available in completion row
+        if "単位" in raw_fields and raw_fields["単位"] and raw_fields["単位"].strip():
+            last_item.unit = raw_fields["単位"].strip()
+            logger.debug(
+                f"Excel: Updated unit to '{last_item.unit}' for item '{last_item.item_key}'")
 
         # Merge additional fields (like unit) from the completion row
         for field_name, field_value in raw_fields.items():
@@ -1861,7 +1918,9 @@ class ExcelParser:
                 item_key=item_key,
                 raw_fields=raw_fields,
                 quantity=quantity,
-                source="Excel"
+                unit=raw_fields.get("単位"),
+                source="Excel",
+                page_number=None
             ))
 
         return items

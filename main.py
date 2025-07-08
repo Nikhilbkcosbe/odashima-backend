@@ -15,9 +15,9 @@ app = FastAPI(title="Coseb Project Management")
 # More explicit CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://odajimagumi.cosbe.inc",
-                   "http://localhost:5173", "https://odajimagumi.cosbe.inc/"],
-    allow_credentials=True,
+    allow_origins=["https://odashimagumi.cosbe.inc",
+                   "http://localhost:5173", "https://odashimagumi.cosbe.inc/"],
+    allow_credentials=True, 
     allow_methods=["*"],
     allow_headers=["*"],
     max_age=3600
