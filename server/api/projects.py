@@ -230,7 +230,7 @@ async def delete_project(project_id: str, current_user: str = Depends(oauth2_sch
         if project["created_by"] != current_user["email"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to delete this project.",
+                detail=project["created_by"]
             )
 
         # Delete the project

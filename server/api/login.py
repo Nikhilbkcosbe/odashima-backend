@@ -97,7 +97,6 @@ async def login(loginData: LoginInputDataModel, request: Request):
         CSRF_TOKEN_EXPIRE_MINUTES = CSRF_TOKEN_EXPIRE_DAYS * 24 * 60
         csrf_token_expires = timedelta(minutes=CSRF_TOKEN_EXPIRE_MINUTES)
         session_id = str(uuid.uuid4())
-        print("session_id==>", session_id)
         session_id_token = user["email"] + session_id
         csrf_token = create_csrf_token(
             data={
@@ -108,7 +107,6 @@ async def login(loginData: LoginInputDataModel, request: Request):
             secret_key=os.getenv('csrf_token_secrete_key'),
             expires_delta=csrf_token_expires,
         )
-        print("csrf_token==>", csrf_token)
         session_hash = create_session_id_hash(session_id_token)
         KEY = bytes(os.getenv('csrf_encryption_secrete_key').encode("utf-8"))
         IV = bytes(os.getenv('aes_encryption_initial_vector').encode("utf-8"))

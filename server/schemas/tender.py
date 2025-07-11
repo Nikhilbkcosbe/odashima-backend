@@ -15,6 +15,23 @@ class TenderItem(BaseModel):
         None, description="Page number where the item was found (for PDF items)")
 
 
+class SubtableItem(BaseModel):
+    item_key: str = Field(...,
+                          description="Concatenated and normalized item key for subtable")
+    raw_fields: Dict[str, str] = Field(...,
+                                       description="Original fields like 名称・規格, 単位, 単数, 摘要")
+    quantity: float = Field(..., description="Item quantity (単数)")
+    unit: Optional[str] = Field(None, description="Unit of measurement (単位)")
+    source: Literal["PDF",
+                    "Excel"] = Field(..., description="Source document type")
+    page_number: Optional[int] = Field(
+        None, description="Page number where the item was found (for PDF items)")
+    reference_number: Optional[str] = Field(
+        None, description="Reference number like '単 3号' associated with this item")
+    sheet_name: Optional[str] = Field(
+        None, description="Excel sheet name where the item was found (for Excel items)")
+
+
 class ComparisonResult(BaseModel):
     status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "MISSING",
                     "EXTRA"] = Field(..., description="Comparison status")
@@ -43,3 +60,14 @@ class ComparisonSummary(BaseModel):
     extra_items: int = Field(..., description="Number of extra items in Excel")
     results: List[ComparisonResult] = Field(...,
                                             description="Detailed comparison results")
+
+
+class SubtableComparisonSummary(BaseModel):
+    total_pdf_subtables: int = Field(...,
+                                     description="Total number of PDF subtable items")
+    total_excel_subtables: int = Field(...,
+                                       description="Total number of Excel subtable items")
+    pdf_subtables: List[SubtableItem] = Field(
+        ..., description="PDF subtable items")
+    excel_subtables: List[SubtableItem] = Field(
+        ..., description="Excel subtable items")

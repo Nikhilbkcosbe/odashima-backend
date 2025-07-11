@@ -3,7 +3,7 @@ import os
 import re
 import logging
 from typing import List, Dict, Tuple, Optional, Union
-from ..schemas.tender import TenderItem
+from ..schemas.tender import TenderItem, SubtableItem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +23,7 @@ class PDFParser:
             "数量・金額増減": ["数量・金額増減", "増減", "変更"],
             "摘要": ["摘要", "備考", "摘 要"]
         }
+
         self.column_patterns = self.default_column_patterns.copy()
 
     def extract_tables(self, pdf_path: str) -> List[TenderItem]:
@@ -583,3 +584,632 @@ class PDFParser:
             return result
         else:
             return None
+
+    def extract_subtables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None) -> List[SubtableItem]:
+        """
+        Extract subtables from PDF with specified page range using different extraction logic.
+
+        Subtable extraction requirements:
+        1. Ignore rows with only "合計" and "単価" without quantities
+        2. Column headers: 名称・規格, 単位, 単数, 摘要
+        3. Find reference numbers like "単 3号" and associate table data with them
+
+        Args:
+            pdf_path: Path to the PDF file
+            start_page: Starting page number (1-based, None means start from page 1)
+            end_page: Ending page number (1-based, None means extract all pages)
+        """
+        all_subtable_items = []
+
+        logger.info(f"Starting PDF subtable extraction from: {pdf_path}")
+        logger.info(
+            f"Subtable page range: {start_page or 'start'} to {end_page or 'end'}")
+
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+                logger.info(f"PDF has {total_pages} pages total")
+
+                # STEP 1: Dynamically discover all reference patterns from main table
+                logger.info(
+                    "Step 1: Discovering reference patterns from main table...")
+                discovered_patterns = self._discover_reference_patterns_from_main_table(
+                    pdf)
+
+                if not discovered_patterns:
+                    logger.warning(
+                        "No reference patterns discovered from main table, using fallback patterns")
+                    # Fallback to known patterns
+                    discovered_patterns = ['単', '道', '内']
+
+                logger.info(
+                    f"Discovered reference patterns: {discovered_patterns}")
+
+                # STEP 2: Extract subtables using discovered patterns
+                # Determine actual page range
+                actual_start = (
+                    start_page - 1) if start_page is not None else 0
+                actual_end = (
+                    end_page - 1) if end_page is not None else total_pages - 1
+
+                # Validate page range
+                actual_start = max(0, actual_start)
+                actual_end = min(total_pages - 1, actual_end)
+
+                if actual_start > actual_end:
+                    logger.warning(
+                        f"Invalid page range: start={actual_start+1}, end={actual_end+1}")
+                    return all_subtable_items
+
+                pages_to_process = actual_end - actual_start + 1
+                logger.info(
+                    f"Processing pages {actual_start + 1} to {actual_end + 1} ({pages_to_process} pages) for subtables")
+
+                # Process specified page range for subtables
+                for page_num in range(actual_start, actual_end + 1):
+                    page = pdf.pages[page_num]
+                    logger.info(
+                        f"Processing page {page_num + 1}/{total_pages} for subtables")
+
+                    page_subtables = self._extract_subtables_from_page(
+                        page, page_num, discovered_patterns)
+
+                    logger.info(
+                        f"Extracted {len(page_subtables)} subtable items from page {page_num + 1}")
+
+                    all_subtable_items.extend(page_subtables)
+
+                logger.info(
+                    f"Total subtable items extracted from PDF (pages {actual_start + 1}-{actual_end + 1}): {len(all_subtable_items)}")
+
+        except Exception as e:
+            logger.error(f"Error processing PDF for subtables: {e}")
+            raise
+
+        return all_subtable_items
+
+    def _discover_reference_patterns_from_main_table(self, pdf) -> List[str]:
+        """
+        Dynamically discover all reference patterns from the main table's 摘要 column.
+        This makes the extraction work with any PDF file, not just hardcoded patterns.
+
+        Args:
+            pdf: Opened PDF file object
+
+        Returns:
+            List of discovered reference prefixes (e.g., ['単', '内', '道', '諸'])
+        """
+        discovered_patterns = set()
+
+        # Assume main table is on pages 4-12 (this could be made configurable)
+        main_table_start = 3  # 0-based page index for page 4
+        main_table_end = 11   # 0-based page index for page 12
+
+        logger.info(
+            f"Scanning main table pages {main_table_start + 1} to {main_table_end + 1} for reference patterns")
+
+        for page_num in range(main_table_start, min(main_table_end + 1, len(pdf.pages))):
+            page = pdf.pages[page_num]
+            tables = page.extract_tables()
+
+            if not tables:
+                continue
+
+            for table in tables:
+                if not table:
+                    continue
+
+                # Look for 摘要 column and extract reference patterns
+                for row in table:
+                    if not row:
+                        continue
+
+                    for cell in row:
+                        if not cell:
+                            continue
+
+                        cell_str = str(cell).strip()
+
+                        # Skip very long text to avoid false positives
+                        if len(cell_str) > 100:
+                            continue
+
+                        # Find all reference patterns in the cell
+                        patterns = self._extract_all_reference_patterns_from_text(
+                            cell_str)
+                        discovered_patterns.update(patterns)
+
+        # Convert to sorted list for consistent ordering
+        pattern_list = sorted(list(discovered_patterns))
+
+        logger.info(
+            f"Discovered {len(pattern_list)} unique reference patterns: {pattern_list}")
+
+        return pattern_list
+
+    def _extract_all_reference_patterns_from_text(self, text: str) -> List[str]:
+        """
+        Extract all possible reference patterns from a text string.
+
+        Args:
+            text: Text to search for reference patterns
+
+        Returns:
+            List of reference prefixes found (e.g., ['単', '内'])
+        """
+        patterns = []
+
+        # Comprehensive regex to match various Japanese reference patterns
+        # Matches: [Japanese character][optional space][number][optional space]号
+        reference_regex = r'([一-龯\w])\s*(\d+)\s*号'
+
+        matches = re.findall(reference_regex, text)
+
+        for match in matches:
+            if len(match) >= 2:
+                prefix = match[0]
+                number = match[1]
+
+                # Validate that it looks like a reference pattern
+                if self._is_valid_reference_prefix(prefix) and number.isdigit():
+                    patterns.append(prefix)
+
+        return patterns
+
+    def _is_valid_reference_prefix(self, prefix: str) -> bool:
+        """
+        Check if a prefix is a valid reference prefix.
+
+        Args:
+            prefix: Potential reference prefix
+
+        Returns:
+            True if it's a valid reference prefix
+        """
+        # Single character prefixes are most common
+        if len(prefix) != 1:
+            return False
+
+        # Common Japanese reference prefixes
+        # This list can be expanded based on observations
+        common_prefixes = {
+            '単', '内', '道', '諸', '雑', '材', '工', '機', '労', '共', '設',
+            '備', '運', '管', '設', '電', '水', '土', '建', '構', '橋', '舗'
+        }
+
+        # Allow common prefixes or single Japanese characters
+        return prefix in common_prefixes or '\u3040' <= prefix <= '\u309f' or '\u30a0' <= prefix <= '\u30ff' or '\u4e00' <= prefix <= '\u9faf'
+
+    def _extract_subtables_from_page(self, page, page_num: int, discovered_patterns: List[str]) -> List[SubtableItem]:
+        """
+        Extract subtables from a single page with specific subtable logic.
+        Updated to use dynamically discovered patterns.
+        """
+        page_subtable_items = []
+        current_reference_number = None
+
+        try:
+            tables = page.extract_tables()
+
+            if not tables:
+                logger.info(
+                    f"No tables found on page {page_num + 1} for subtables")
+                return page_subtable_items
+
+            logger.info(
+                f"Found {len(tables)} tables on page {page_num + 1} for subtable extraction")
+
+            # Process each table for subtables
+            for table_num, table in enumerate(tables):
+                logger.info(
+                    f"Processing table {table_num + 1}/{len(tables)} on page {page_num + 1} for subtables")
+
+                # Look for reference numbers and subtable data in this table
+                table_subtables, reference_number = self._process_single_table_for_subtables(
+                    table, page_num, table_num, current_reference_number, discovered_patterns)
+
+                # Update current reference number if found
+                if reference_number:
+                    current_reference_number = reference_number
+
+                logger.info(
+                    f"Extracted {len(table_subtables)} subtable items from table {table_num + 1}")
+
+                page_subtable_items.extend(table_subtables)
+
+        except Exception as e:
+            logger.error(
+                f"Error processing page {page_num + 1} for subtables: {e}")
+
+        return page_subtable_items
+
+    def _process_single_table_for_subtables(self, table: List[List], page_num: int, table_num: int, current_reference: Optional[str], discovered_patterns: List[str]) -> Tuple[List[SubtableItem], Optional[str]]:
+        """
+        Process a single table for subtable extraction with reference number detection.
+
+        Returns:
+            Tuple of (subtable_items, detected_reference_number)
+        """
+        subtable_items = []
+        detected_reference = current_reference
+
+        if not table or len(table) < 2:
+            logger.warning(
+                f"Table {table_num + 1} on page {page_num + 1} is too small for subtable processing")
+            return subtable_items, detected_reference
+
+        # Subtable-specific column patterns - updated based on actual PDF structure
+        subtable_column_patterns = {
+            "名称・規格": ["名称・規格", "名称", "規格", "名 称 ・ 規 格", "名 称", "規 格"],
+            "条件": ["条件", "条 件"],
+            "単位": ["単位", "単 位"],
+            "数量": ["数量", "数 量"],
+            "単価": ["単価", "単 価"],
+            "金額": ["金額", "金 額"],
+            "数量・金額増減": ["数量・金額増減", "増減", "数量増減", "金額増減"],
+            "摘要": ["摘要", "備考", "摘 要", "備 考"]
+        }
+
+        # Process each row to find reference numbers and subtable data
+        for row_idx, row in enumerate(table):
+            if not row:
+                continue
+
+            # Check for reference numbers like "単 3号"
+            reference_found = self._extract_reference_number(
+                row, discovered_patterns)
+            if reference_found:
+                detected_reference = reference_found
+                logger.info(
+                    f"Found reference number '{detected_reference}' in table {table_num + 1}, row {row_idx + 1}")
+                continue
+
+            # Check if this row is a subtable header
+            if self._is_subtable_header_row(row, subtable_column_patterns):
+                logger.info(
+                    f"Found subtable header at row {row_idx + 1} in table {table_num + 1}")
+                # Process data rows following this header
+                data_rows = table[row_idx + 1:]
+                col_mapping = self._get_subtable_column_mapping(
+                    row, subtable_column_patterns)
+
+                if col_mapping:
+                    # Process data rows with row spanning logic for subtables
+                    subtable_items_from_rows = self._process_subtable_data_rows_with_spanning(
+                        data_rows, col_mapping, page_num, detected_reference, row_idx + 1
+                    )
+                    subtable_items.extend(subtable_items_from_rows)
+
+                break  # Stop processing this table after finding subtable header
+
+        return subtable_items, detected_reference
+
+    def _extract_reference_number(self, row: List, discovered_patterns: List[str]) -> Optional[str]:
+        """
+        Extract reference numbers from a row using dynamically discovered patterns.
+        This works with any PDF file by using patterns found in the main table.
+        
+        Args:
+            row: Table row to search
+            discovered_patterns: List of reference prefixes found in main table
+            
+        Returns:
+            Reference number string (e.g., "単 45号") or None
+        """
+        if not discovered_patterns:
+            return None
+            
+        for cell in row:
+            if not cell:
+                continue
+
+            cell_str = str(cell).strip()
+
+            # Create dynamic pattern based on discovered prefixes
+            # Join all discovered patterns with | for regex OR
+            escaped_patterns = [re.escape(pattern) for pattern in discovered_patterns]
+            pattern_group = '|'.join(escaped_patterns)
+            
+            # Main pattern: (discovered_prefix) + optional space + number + 号
+            reference_pattern = f'({pattern_group})\\s*(\\d+)\\s*号'
+            match = re.search(reference_pattern, cell_str)
+
+            if match:
+                prefix = match.group(1)
+                number = match.group(2)
+                return f"{prefix} {number}号"
+
+            # Alternative pattern without 号 but with discovered prefixes (for short strings only)
+            reference_pattern_alt = f'({pattern_group})\\s*(\\d+)'
+            match_alt = re.search(reference_pattern_alt, cell_str)
+
+            # Only for short strings to avoid false positives
+            if match_alt and len(cell_str.strip()) <= 10:
+                prefix = match_alt.group(1)
+                number = match_alt.group(2)
+                return f"{prefix} {number}号"
+
+        return None
+
+    def _is_subtable_header_row(self, row: List, column_patterns: Dict[str, List[str]]) -> bool:
+        """
+        Check if a row is a subtable header based on the specific column patterns.
+        """
+        if not row:
+            return False
+
+        # Check if row contains required subtable column headers
+        required_patterns = ["名称", "単位", "数量"]  # Core required columns
+        found_patterns = 0
+
+        for cell in row:
+            if not cell:
+                continue
+
+            cell_str = str(cell).strip()
+
+            for pattern in required_patterns:
+                if pattern in cell_str:
+                    found_patterns += 1
+                    break
+
+        # Consider it a header if we find at least 2 of the 3 required patterns
+        return found_patterns >= 2
+
+    def _get_subtable_column_mapping(self, header_row: List, column_patterns: Dict[str, List[str]]) -> Dict[str, int]:
+        """
+        Map subtable column names to indices based on header row.
+        """
+        col_indices = {}
+
+        for col_name, patterns in column_patterns.items():
+            for i, cell in enumerate(header_row):
+                if not cell:
+                    continue
+
+                cell_str = str(cell).strip()
+
+                for pattern in patterns:
+                    if pattern in cell_str:
+                        col_indices[col_name] = i
+                        break
+
+                if col_name in col_indices:
+                    break
+
+        return col_indices
+
+    def _is_subtable_end_row(self, row: List) -> bool:
+        """
+        Check if a row indicates the end of a subtable.
+        """
+        if not row:
+            return True
+
+        # Check for typical end indicators
+        for cell in row:
+            if not cell:
+                continue
+
+            cell_str = str(cell).strip()
+
+            # End indicators
+            end_patterns = ["合計", "小計", "総計", "計"]
+
+            for pattern in end_patterns:
+                if pattern in cell_str and len(cell_str) <= 10:
+                    return True
+
+        return False
+
+    def _process_subtable_data_row(self, row: List, col_mapping: Dict[str, int],
+                                   page_num: int, reference_number: Optional[str],
+                                   row_num: int) -> Optional[SubtableItem]:
+        """
+        Process a single subtable data row and create SubtableItem if valid.
+        """
+        if not row:
+            return None
+
+        # Extract fields based on column mapping
+        raw_fields = {}
+        quantity = 0.0
+        unit = None
+        item_name = None
+
+        for col_name, col_idx in col_mapping.items():
+            if col_idx < len(row) and row[col_idx]:
+                cell_value = str(row[col_idx]).strip()
+                if cell_value:
+                    if col_name == "数量":
+                        quantity = self._extract_quantity(cell_value)
+                    elif col_name == "単位":
+                        unit = cell_value
+                    elif col_name == "名称・規格":
+                        item_name = cell_value
+
+                    raw_fields[col_name] = cell_value
+
+        # Apply subtable-specific filtering rules
+        # Must have item name
+        if not item_name:
+            logger.debug(f"Skipping row {row_num}: missing item name")
+            return None
+
+        # Accept items with either:
+        # 1. Valid quantity (> 0), OR
+        # 2. Item name + unit (even if quantity is 0 or missing)
+        has_valid_quantity = quantity > 0
+        has_name_and_unit = item_name and unit
+
+        if not (has_valid_quantity or has_name_and_unit):
+            logger.debug(
+                f"Skipping row {row_num}: no valid quantity and no unit")
+            return None
+
+        # Ignore rows with only "合計" and "単価" without meaningful data
+        if ("合計" in item_name or "単価" in item_name) and not has_valid_quantity and not unit:
+            logger.debug(
+                f"Skipping row {row_num}: contains '合計' or '単価' without meaningful data")
+            return None
+
+        # Create item key
+        item_key = self._create_subtable_item_key(raw_fields, reference_number)
+
+        if not item_key:
+            return None
+
+        return SubtableItem(
+            item_key=item_key,
+            raw_fields=raw_fields,
+            quantity=quantity,
+            unit=unit,
+            source="PDF",
+            page_number=page_num + 1,  # Convert 0-based to 1-based
+            reference_number=reference_number
+        )
+
+    def _process_subtable_data_rows_with_spanning(self, data_rows: List[List], col_mapping: Dict[str, int],
+                                                  page_num: int, reference_number: Optional[str],
+                                                  start_row_num: int) -> List[SubtableItem]:
+        """
+        Process subtable data rows with row spanning logic.
+
+        In subtable structure, data often spans multiple rows:
+        - Row 1: Item name only
+        - Row 2: Empty
+        - Row 3: Unit and quantity
+        """
+        subtable_items = []
+        i = 0
+
+        while i < len(data_rows):
+            row = data_rows[i]
+
+            if not row:
+                i += 1
+                continue
+
+            # Check if this is the end of the subtable
+            if self._is_subtable_end_row(row):
+                break
+
+            # Try to process this row as a potential subtable item
+            item_data = self._extract_subtable_item_data_with_spanning(
+                data_rows, i, col_mapping, page_num, reference_number, start_row_num + i
+            )
+
+            if item_data:
+                subtable_items.append(item_data['item'])
+                i = item_data['next_index']  # Skip processed rows
+            else:
+                i += 1
+
+        return subtable_items
+
+    def _extract_subtable_item_data_with_spanning(self, data_rows: List[List], start_idx: int,
+                                                  col_mapping: Dict[str, int], page_num: int,
+                                                  reference_number: Optional[str], row_num: int) -> Optional[Dict]:
+        """
+        Extract subtable item data with row spanning logic.
+
+        Returns dict with 'item' and 'next_index' or None if no valid item found.
+        """
+        if start_idx >= len(data_rows):
+            return None
+
+        # Look ahead up to 3 rows to gather complete item information
+        item_name = None
+        quantity = 0.0
+        unit = None
+        raw_fields = {}
+        rows_processed = 1
+
+        # Check the next few rows for spanning data
+        for offset in range(min(3, len(data_rows) - start_idx)):
+            row = data_rows[start_idx + offset]
+
+            if not row:
+                continue
+
+            # Extract data from this row
+            for col_name, col_idx in col_mapping.items():
+                if col_idx < len(row) and row[col_idx]:
+                    cell_value = str(row[col_idx]).strip()
+                    if cell_value:
+                        if col_name == "名称・規格" and not item_name:
+                            item_name = cell_value
+                            raw_fields[col_name] = cell_value
+                        elif col_name == "数量" and quantity == 0.0:
+                            quantity = self._extract_quantity(cell_value)
+                            raw_fields[col_name] = cell_value
+                        elif col_name == "単位" and not unit:
+                            unit = cell_value
+                            raw_fields[col_name] = cell_value
+                        elif col_name not in raw_fields:  # Store other fields
+                            raw_fields[col_name] = cell_value
+
+            # If we find a new item name on a later row, stop here
+            if offset > 0 and col_mapping.get("名称・規格", -1) < len(row):
+                cell_value = row[col_mapping["名称・規格"]
+                                 ] if col_mapping["名称・規格"] < len(row) else None
+                if cell_value and str(cell_value).strip() and item_name and str(cell_value).strip() != item_name:
+                    # This is a new item, don't include this row
+                    break
+
+            rows_processed = offset + 1
+
+        # Apply subtable filtering rules
+        # Must have item name
+        if not item_name:
+            return None
+
+        # Accept items with either:
+        # 1. Valid quantity (> 0), OR
+        # 2. Item name + unit (even if quantity is 0 or missing)
+        has_valid_quantity = quantity > 0
+        has_name_and_unit = item_name and unit
+
+        if not (has_valid_quantity or has_name_and_unit):
+            return None
+
+        # Ignore rows with only "合計" and "単価" without meaningful data
+        if ("合計" in item_name or "単価" in item_name) and not has_valid_quantity and not unit:
+            return None
+
+        # Create item key
+        item_key = self._create_subtable_item_key(raw_fields, reference_number)
+
+        if not item_key:
+            return None
+
+        # Create SubtableItem
+        subtable_item = SubtableItem(
+            item_key=item_key,
+            raw_fields=raw_fields,
+            quantity=quantity,
+            unit=unit,
+            source="PDF",
+            page_number=page_num + 1,  # Convert 0-based to 1-based
+            reference_number=reference_number,
+            sheet_name=None  # PDF doesn't have sheet names
+        )
+
+        return {
+            'item': subtable_item,
+            'next_index': start_idx + rows_processed
+        }
+
+    def _create_subtable_item_key(self, raw_fields: Dict[str, str], reference_number: Optional[str]) -> str:
+        """
+        Create item key for subtable items.
+        For subtables, the item_key should just be the item name (名称・規格).
+        The reference number is stored separately in the reference_number field.
+        """
+        # Use 名称・規格 as primary identifier (without reference number prefix)
+        base_key = ""
+
+        if "名称・規格" in raw_fields and raw_fields["名称・規格"]:
+            base_key = raw_fields["名称・規格"].strip()
+
+        return base_key

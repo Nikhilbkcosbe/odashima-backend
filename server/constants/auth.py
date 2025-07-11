@@ -5,8 +5,8 @@ from fastapi_mail import ConnectionConfig
 load_dotenv()
 
 ORIGINS = [
-    'https://odashimagumi.cosbe.inc/',
-    'https://www.odashimagumi.cosbe.inc/',
+    'https://odashimagumi.cosbe.inc',
+    'https://www.odashimagumi.cosbe.inc',
     'http://localhost:3000', 
     'http://localhost:5173',
     'http://localhost:8000'
