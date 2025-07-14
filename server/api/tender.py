@@ -9,6 +9,7 @@ from ..schemas.tender import ComparisonSummary, SubtableComparisonSummary
 from ..services.pdf_parser import PDFParser
 from ..services.excel_parser import ExcelParser
 from ..services.matcher import Matcher
+from ..services.excel_table_extractor_service import ExcelTableExtractorService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -104,9 +105,18 @@ async def compare_tender_files(
 
         # Extract items from Excel with sheet filter
         logger.info("Extracting items from Excel with specified parameters...")
-        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
-        logger.info(f"Total Excel items extracted: {len(excel_items)}")
+        if sheet_name:
+            # Use the new standalone corrected main table extraction for specific sheet
+            excel_table_extractor = ExcelTableExtractorService()
+            excel_items = excel_table_extractor.extract_main_table_from_buffer(
+                excel_buffer, sheet_name)
+            logger.info(
+                f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
+        else:
+            # Use original method for all sheets
+            excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+                excel_buffer, sheet_name)
+            logger.info(f"Total Excel items extracted: {len(excel_items)}")
 
         # Close Excel buffer
         excel_buffer.close()
@@ -142,6 +152,160 @@ async def compare_tender_files(
     except Exception as e:
         logger.error(
             f"Error during comparison process: {str(e)}", exc_info=True)
+        gc.collect()
+        raise HTTPException(
+            status_code=500, detail=f"Processing error: {str(e)}")
+
+    finally:
+        # Clean up PDF temporary file
+        try:
+            if pdf_fd is not None:
+                os.close(pdf_fd)
+        except Exception as e:
+            logger.error(f"Error closing PDF file descriptor: {e}")
+
+        gc.collect()
+
+        # Remove PDF temporary file
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.unlink(pdf_path)
+                logger.info("Temporary PDF file cleaned up")
+            except Exception as e:
+                logger.warning(f"Could not remove temporary PDF file: {e}")
+                try:
+                    import time
+                    time.sleep(0.5)
+                    os.unlink(pdf_path)
+                    logger.info("Temporary PDF file cleaned up (retry)")
+                except Exception as e2:
+                    logger.error(
+                        f"Failed to clean up temporary PDF file: {e2}")
+
+
+@router.post("/compare-main-table-corrected", response_model=ComparisonSummary)
+async def compare_main_table_corrected(
+    pdf_file: UploadFile = File(...),
+    excel_file: UploadFile = File(...),
+    start_page: Optional[int] = Form(None),
+    end_page: Optional[int] = Form(None),
+    sheet_name: str = Form(...)
+) -> ComparisonSummary:
+    """
+    Compare a tender PDF with an Excel main table using the corrected extraction logic.
+    This endpoint specifically uses the new ExcelTableExtractorCorrected logic for main table extraction.
+    Focus on finding mismatches and items present in PDF but not in Excel.
+
+    Args:
+        pdf_file: PDF tender document
+        excel_file: Excel proposal document
+        start_page: Starting page number for PDF extraction (optional)
+        end_page: Ending page number for PDF extraction (optional)
+        sheet_name: Specific Excel sheet name to extract from (required for corrected logic)
+    """
+    logger.info("=== STARTING CORRECTED MAIN TABLE COMPARISON ===")
+    logger.info(f"PDF file: {pdf_file.filename}")
+    logger.info(f"Excel file: {excel_file.filename}")
+    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"Excel sheet: {sheet_name}")
+
+    # Validate file types
+    if not pdf_file.filename.lower().endswith('.pdf'):
+        logger.error(f"Invalid PDF file: {pdf_file.filename}")
+        raise HTTPException(status_code=400, detail="PDF file required")
+    if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
+        logger.error(f"Invalid Excel file: {excel_file.filename}")
+        raise HTTPException(status_code=400, detail="Excel file required")
+
+    # Validate page range
+    if start_page is not None and start_page < 1:
+        raise HTTPException(status_code=400, detail="Start page must be >= 1")
+    if end_page is not None and end_page < 1:
+        raise HTTPException(status_code=400, detail="End page must be >= 1")
+    if start_page is not None and end_page is not None and start_page > end_page:
+        raise HTTPException(
+            status_code=400, detail="Start page cannot be greater than end page")
+
+    # For PDF, we still need a temporary file (pdfplumber requires file path)
+    # For Excel, we can use in-memory processing
+    pdf_fd = None
+    pdf_path = None
+
+    try:
+        logger.info("=== PROCESSING PDF FILE ===")
+        # Handle PDF file (requires temporary file)
+        pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='tender_')
+
+        # Save PDF to temporary file
+        pdf_content = await pdf_file.read()
+        logger.info(f"PDF file size: {len(pdf_content)} bytes")
+
+        with os.fdopen(pdf_fd, 'wb') as f:
+            f.write(pdf_content)
+        pdf_fd = None  # File descriptor is closed now
+
+        logger.info("=== PROCESSING EXCEL FILE ===")
+        # Handle Excel file (in-memory processing)
+        excel_content = await excel_file.read()
+        logger.info(f"Excel file size: {len(excel_content)} bytes")
+
+        # Create in-memory buffer for Excel
+        excel_buffer = BytesIO(excel_content)
+
+        logger.info("=== STARTING CORRECTED EXTRACTION PROCESS ===")
+        # Parse files iteratively with parameters
+        pdf_parser = PDFParser()
+        excel_parser = ExcelParser()
+
+        # Extract items from PDF with page range
+        logger.info("Extracting items from PDF with specified parameters...")
+        pdf_items = pdf_parser.extract_tables_with_range(
+            pdf_path, start_page, end_page)
+        logger.info(f"Total PDF items extracted: {len(pdf_items)}")
+
+        # Extract items from Excel using corrected main table extraction
+        logger.info(
+            "Extracting items from Excel using corrected main table logic...")
+        excel_table_extractor = ExcelTableExtractorService()
+        excel_items = excel_table_extractor.extract_main_table_from_buffer(
+            excel_buffer, sheet_name)
+        logger.info(
+            f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
+
+        # Close Excel buffer
+        excel_buffer.close()
+
+        if not pdf_items:
+            logger.warning("No items found in PDF!")
+            raise HTTPException(
+                status_code=400, detail="No extractable items found in PDF")
+
+        if not excel_items:
+            logger.warning("No items found in Excel!")
+            raise HTTPException(
+                status_code=400, detail="No extractable items found in Excel")
+
+        logger.info("=== STARTING COMPARISON PROCESS ===")
+        # Compare items focusing on mismatches and missing items
+        matcher = Matcher()
+        result = matcher.compare_items(pdf_items, excel_items)
+
+        logger.info("=== CORRECTED COMPARISON COMPLETED ===")
+        logger.info(f"Summary: {result.matched_items} matches, {result.quantity_mismatches} mismatches, "
+                    f"{result.missing_items} missing, {result.extra_items} extra")
+
+        # Clean up references
+        del pdf_parser, excel_parser, matcher, pdf_items, excel_items, excel_buffer
+        gc.collect()
+
+        return result
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error during corrected comparison process: {str(e)}", exc_info=True)
         gc.collect()
         raise HTTPException(
             status_code=500, detail=f"Processing error: {str(e)}")
@@ -232,8 +396,22 @@ async def compare_tender_files_missing_only(
 
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page)
-        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
+
+        # Extract items from Excel with sheet filter
+        logger.info("Extracting items from Excel with specified parameters...")
+        if sheet_name:
+            # Use the new standalone corrected main table extraction for specific sheet
+            excel_table_extractor = ExcelTableExtractorService()
+            excel_items = excel_table_extractor.extract_main_table_from_buffer(
+                excel_buffer, sheet_name)
+            logger.info(
+                f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
+        else:
+            # Use original method for all sheets
+            excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+                excel_buffer, sheet_name)
+            logger.info(f"Total Excel items extracted: {len(excel_items)}")
+
         excel_buffer.close()
 
         # Get only missing items
@@ -361,8 +539,22 @@ async def compare_tender_files_mismatches_only(
 
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page)
-        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
+
+        # Extract items from Excel with sheet filter
+        logger.info("Extracting items from Excel with specified parameters...")
+        if sheet_name:
+            # Use the new standalone corrected main table extraction for specific sheet
+            excel_table_extractor = ExcelTableExtractorService()
+            excel_items = excel_table_extractor.extract_main_table_from_buffer(
+                excel_buffer, sheet_name)
+            logger.info(
+                f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
+        else:
+            # Use original method for all sheets
+            excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+                excel_buffer, sheet_name)
+            logger.info(f"Total Excel items extracted: {len(excel_items)}")
+
         excel_buffer.close()
 
         # Get only mismatched items
@@ -504,8 +696,22 @@ async def compare_tender_files_unit_mismatches_only(
 
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page)
-        excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-            excel_buffer, sheet_name)
+
+        # Extract items from Excel with sheet filter
+        logger.info("Extracting items from Excel with specified parameters...")
+        if sheet_name:
+            # Use the new standalone corrected main table extraction for specific sheet
+            excel_table_extractor = ExcelTableExtractorService()
+            excel_items = excel_table_extractor.extract_main_table_from_buffer(
+                excel_buffer, sheet_name)
+            logger.info(
+                f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
+        else:
+            # Use original method for all sheets
+            excel_items = excel_parser.extract_items_from_buffer_with_sheet(
+                excel_buffer, sheet_name)
+            logger.info(f"Total Excel items extracted: {len(excel_items)}")
+
         excel_buffer.close()
 
         # Get only unit mismatched items
@@ -595,19 +801,19 @@ async def compare_subtables(
 ) -> SubtableComparisonSummary:
     """
     Extract subtables from both PDF and Excel files.
-    
+
     Subtable extraction for PDF:
     1. Dynamically discovers reference patterns from main table
     2. Ignores rows with only "合計" and "単価" without quantities  
     3. Looks for specific column headers: 名称・規格, 条件, 単位, 数量, etc.
     4. Finds reference numbers like "内 X号", "単 Y号" and associates table data with them
-    
+
     Subtable extraction for Excel:
     1. Dynamically discovers reference patterns from main sheet
     2. Scans all non-main sheets for subtables
     3. Applies same filtering logic as PDF
     4. Supports row spanning for items with name+unit but no quantity
-    
+
     Args:
         pdf_file: PDF document containing subtables
         excel_file: Excel document containing subtables in multiple sheets
@@ -618,8 +824,9 @@ async def compare_subtables(
     logger.info(f"PDF file: {pdf_file.filename}")
     logger.info(f"Excel file: {excel_file.filename}")
     logger.info(f"Main sheet name (if provided): {main_sheet_name}")
-    logger.info(f"PDF subtable page range: {pdf_subtable_start_page} to {pdf_subtable_end_page}")
-    
+    logger.info(
+        f"PDF subtable page range: {pdf_subtable_start_page} to {pdf_subtable_end_page}")
+
     # Validate file types
     if not pdf_file.filename.lower().endswith('.pdf'):
         logger.error(f"Invalid PDF file: {pdf_file.filename}")
@@ -627,61 +834,83 @@ async def compare_subtables(
     if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
         logger.error(f"Invalid Excel file: {excel_file.filename}")
         raise HTTPException(status_code=400, detail="Excel file required")
-    
+
     # Validate page range
     if pdf_subtable_start_page is not None and pdf_subtable_start_page < 1:
-        raise HTTPException(status_code=400, detail="PDF subtable start page must be >= 1")
+        raise HTTPException(
+            status_code=400, detail="PDF subtable start page must be >= 1")
     if pdf_subtable_end_page is not None and pdf_subtable_end_page < 1:
-        raise HTTPException(status_code=400, detail="PDF subtable end page must be >= 1")
-    if (pdf_subtable_start_page is not None and pdf_subtable_end_page is not None and 
-        pdf_subtable_start_page > pdf_subtable_end_page):
+        raise HTTPException(
+            status_code=400, detail="PDF subtable end page must be >= 1")
+    if (pdf_subtable_start_page is not None and pdf_subtable_end_page is not None and
+            pdf_subtable_start_page > pdf_subtable_end_page):
         raise HTTPException(
             status_code=400, detail="PDF subtable start page cannot be greater than end page")
-    
+
     pdf_fd = None
     pdf_path = None
-    
+
     try:
         logger.info("=== PROCESSING PDF FILE FOR SUBTABLES ===")
         # Handle PDF file (requires temporary file)
         pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='subtable_')
-        
+
         # Save PDF to temporary file
         pdf_content = await pdf_file.read()
         logger.info(f"PDF file size: {len(pdf_content)} bytes")
-        
+
         with os.fdopen(pdf_fd, 'wb') as f:
             f.write(pdf_content)
         pdf_fd = None  # File descriptor is closed now
-        
+
         logger.info("=== PROCESSING EXCEL FILE FOR SUBTABLES ===")
         # Handle Excel file (in-memory processing)
         excel_content = await excel_file.read()
         logger.info(f"Excel file size: {len(excel_content)} bytes")
-        
+
         # Create in-memory buffer for Excel
         excel_buffer = BytesIO(excel_content)
-        
+
         logger.info("=== STARTING SUBTABLE EXTRACTION PROCESS ===")
         # Parse files for subtables
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
+
+        # First, extract the main table to get reference numbers from 摘要 column
+        logger.info("Extracting main table to get reference numbers...")
+        excel_table_extractor = ExcelTableExtractorService()
+        main_table_items = excel_table_extractor.extract_main_table_from_buffer(
+            excel_buffer, main_sheet_name)
+        logger.info(f"Extracted {len(main_table_items)} main table items for reference discovery")
+
+        # Extract reference numbers from main table's 摘要 column
+        reference_numbers = []
+        for item in main_table_items:
+            remarks = item.raw_fields.get('摘要', '')
+            if remarks and remarks.strip():
+                reference_numbers.append(remarks.strip())
         
-        # Extract subtables from PDF with page range
-        logger.info("Extracting subtables from PDF with specified parameters...")
+        # Remove duplicates and filter valid reference numbers
+        unique_references = list(set(reference_numbers))
+        valid_references = [ref for ref in unique_references if ref and ('号' in ref or '単' in ref)]
+        
+        logger.info(f"Found {len(valid_references)} unique reference numbers from main table: {valid_references[:10]}...")
+
+        # Extract subtables from PDF with page range and reference numbers
+        logger.info("Extracting subtables from PDF with reference numbers...")
         pdf_subtables = pdf_parser.extract_subtables_with_range(
-            pdf_path, pdf_subtable_start_page, pdf_subtable_end_page)
+            pdf_path, pdf_subtable_start_page, pdf_subtable_end_page, valid_references)
         logger.info(f"Total PDF subtables extracted: {len(pdf_subtables)}")
-        
-        # Extract subtables from Excel
-        logger.info("Extracting subtables from Excel…")
-        excel_subtables = excel_parser.extract_subtables_from_buffer(
-            excel_buffer, main_sheet_name=main_sheet_name)
+
+        # Extract subtables from Excel using the new boundary-based logic
+        logger.info("Extracting subtables from Excel using boundary-based logic...")
+        excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
+            excel_buffer, main_sheet_name, main_table_items)
         logger.info(f"Total Excel subtables extracted: {len(excel_subtables)}")
-        
+
         # Close Excel buffer
         excel_buffer.close()
-        
+
         # Create response with both PDF and Excel subtables
         result = SubtableComparisonSummary(
             total_pdf_subtables=len(pdf_subtables),
@@ -689,25 +918,26 @@ async def compare_subtables(
             pdf_subtables=pdf_subtables,
             excel_subtables=excel_subtables
         )
-        
+
         logger.info("=== SUBTABLE EXTRACTION COMPLETED ===")
         logger.info(f"Summary: {len(pdf_subtables)} PDF subtables extracted")
-        
+
         # Clean up references
         del pdf_parser, excel_parser, pdf_subtables, excel_buffer
         gc.collect()
-        
+
         return result
-        
+
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Error during subtable comparison process: {str(e)}", exc_info=True)
+        logger.error(
+            f"Error during subtable comparison process: {str(e)}", exc_info=True)
         gc.collect()
         raise HTTPException(
             status_code=500, detail=f"Subtable processing error: {str(e)}")
-    
+
     finally:
         # Clean up PDF temporary file
         try:
@@ -715,9 +945,9 @@ async def compare_subtables(
                 os.close(pdf_fd)
         except Exception as e:
             logger.error(f"Error closing PDF file descriptor: {e}")
-        
+
         gc.collect()
-        
+
         # Remove PDF temporary file
         if pdf_path and os.path.exists(pdf_path):
             try:
@@ -731,7 +961,5 @@ async def compare_subtables(
                     os.unlink(pdf_path)
                     logger.info("Temporary PDF file cleaned up (retry)")
                 except Exception as e2:
-                    logger.error(f"Failed to clean up temporary PDF file: {e2}")
-
-
-
+                    logger.error(
+                        f"Failed to clean up temporary PDF file: {e2}")

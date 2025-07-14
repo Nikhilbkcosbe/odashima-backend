@@ -4,6 +4,7 @@ import logging
 from typing import List, Dict, Optional, Union, Tuple
 from io import BytesIO
 from ..schemas.tender import TenderItem, SubtableItem
+from .excel_table_extractor_service import ExcelTableExtractorService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +27,8 @@ class ExcelParser:
         self.column_patterns = self.default_column_patterns.copy()
         # Optional custom column name for item extraction
         self.custom_item_name_column = None
+        # Initialize the corrected table extractor service
+        self.table_extractor_service = ExcelTableExtractorService()
 
     def extract_items_from_buffer(self, excel_buffer: BytesIO) -> List[TenderItem]:
         """
@@ -106,6 +109,38 @@ class ExcelParser:
                     logger.error(f"Error closing Excel file: {e}")
 
         return all_items
+
+    def extract_main_table_from_buffer(self, excel_buffer: BytesIO, sheet_name: str) -> List[TenderItem]:
+        """
+        Extract main table from Excel buffer using the corrected table extraction logic.
+        This method uses the new ExcelTableExtractorCorrected logic for main table extraction.
+
+        Args:
+            excel_buffer: BytesIO buffer containing Excel data
+            sheet_name: Name of the sheet to extract from
+
+        Returns:
+            List of TenderItem objects extracted from the main table
+        """
+        logger.info(
+            f"Extracting main table from sheet '{sheet_name}' using corrected logic")
+
+        try:
+            # Use the corrected table extractor service
+            main_table_items = self.table_extractor_service.extract_main_table_from_buffer(
+                excel_buffer, sheet_name
+            )
+
+            logger.info(
+                f"Extracted {len(main_table_items)} items from main table using corrected logic")
+            return main_table_items
+
+        except Exception as e:
+            logger.error(
+                f"Error extracting main table with corrected logic: {e}")
+            # Fallback to original method if corrected logic fails
+            logger.info("Falling back to original extraction method")
+            return self.extract_items_from_buffer_with_sheet(excel_buffer, sheet_name)
 
     def _process_single_sheet(self, excel_file: pd.ExcelFile, sheet_name: str, sheet_idx: int) -> List[TenderItem]:
         """
@@ -3224,8 +3259,10 @@ class ExcelParser:
                         if column_key == "unit":
                             # ENHANCED: More aggressive adjacent column checking, prioritizing rightward shifts
                             # Common in Excel files where data is shifted due to merged cells or complex headers
-                            name_col_idx = col_map.get("name", -1)  # Get name column to avoid confusion
-                            for offset in [1, 2, 3, -1, -2, -3]:  # Prioritize right shift, then left
+                            # Get name column to avoid confusion
+                            name_col_idx = col_map.get("name", -1)
+                            # Prioritize right shift, then left
+                            for offset in [1, 2, 3, -1, -2, -3]:
                                 adj_idx = idx + offset
                                 # CRITICAL: Skip the name column to avoid extracting name as unit
                                 if adj_idx == name_col_idx:
@@ -3244,13 +3281,13 @@ class ExcelParser:
                                             return adj_str
 
                         return ""
-                    
+
                     # Helper function for enhanced unit detection
                     def _is_likely_unit_pattern(text):
                         """Check if text looks like a unit with more comprehensive patterns"""
                         if not text or len(text) > 10:  # Increased length for Japanese construction units
                             return False
-                        
+
                         # Common Japanese/construction unit patterns
                         unit_patterns = [
                             # Weight/mass units
@@ -3271,21 +3308,21 @@ class ExcelParser:
                             # Per-unit expressions
                             "m当り", "当り", "あたり", "当", "毎", "per"
                         ]
-                        
+
                         # Check exact matches
                         if text in unit_patterns:
                             return True
-                        
+
                         # Check if it contains unit-like patterns
                         for pattern in unit_patterns:
                             if pattern in text:
                                 return True
-                        
+
                         # Check for numeric + unit patterns (like "1m当り", "1部材当り")
                         import re
                         if re.match(r'^\d+[a-zA-Zｍｔｇ個本枚組回式人日時間当り孔部材構造物]+$', text):
                             return True
-                        
+
                         return False
 
                     name = _cell(col_map.get("name", -1))
