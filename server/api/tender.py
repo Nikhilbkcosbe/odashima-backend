@@ -896,6 +896,16 @@ async def compare_subtables(
         
         logger.info(f"Found {len(valid_references)} unique reference numbers from main table: {valid_references[:10]}...")
 
+        # IMPORTANT: If no valid references found but page range is specified, 
+        # we should still only process the specified page range without discovery
+        if not valid_references and (pdf_subtable_start_page is not None or pdf_subtable_end_page is not None):
+            logger.warning("No valid reference numbers found from main table, but page range is specified.")
+            logger.warning("Will process specified page range without reference filtering.")
+            # Use None to indicate no specific reference filtering, but still respect page range
+            valid_references = None
+        elif not valid_references:
+            logger.warning("No valid reference numbers found from main table. PDF extraction may use discovery mode.")
+
         # Extract subtables from PDF with page range and reference numbers
         logger.info("Extracting subtables from PDF with reference numbers...")
         pdf_subtables = pdf_parser.extract_subtables_with_range(
