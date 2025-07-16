@@ -223,6 +223,7 @@ class PDFParser:
     def extract_subtables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None, reference_numbers: Optional[List[str]] = None) -> List[SubtableItem]:
         """
         Main entry point for extracting subtables from a PDF.
+        Now scans all pages in the specified range and extracts every subtable matching the pattern (reference number row, header row, data rows).
         """
         all_subtable_items = []
         logger.info(f"Starting PDF subtable extraction from: {pdf_path}")
@@ -242,19 +243,12 @@ class PDFParser:
                 if actual_start > actual_end:
                     return []
 
-                target_references = reference_numbers
-                if not target_references:
-                    logger.info(
-                        "No reference numbers provided, discovering from main table...")
-                    target_references = self._discover_reference_patterns_from_main_table(
-                        pdf)
-
                 logger.info(
-                    f"Processing pages {actual_start + 1} to {actual_end + 1} for subtables")
+                    f"Processing pages {actual_start + 1} to {actual_end + 1} for subtables (pattern-based)")
                 for page_num in range(actual_start, actual_end + 1):
                     page = pdf.pages[page_num]
-                    page_subtables = self._extract_subtables_from_page(
-                        page, page_num, target_references)
+                    page_subtables = self._extract_all_subtables_from_page_pattern(
+                        page, page_num)
                     all_subtable_items.extend(page_subtables)
 
         except Exception as e:
@@ -264,33 +258,68 @@ class PDFParser:
 
         return all_subtable_items
 
-    def _discover_reference_patterns_from_main_table(self, pdf) -> List[str]:
-        """Discovers reference number patterns from the main table's 摘要 column, including substrings like '内 9号'."""
-        discovered_references = set()
-        # A more robust way to define main table pages might be needed
-        main_table_start, main_table_end = 3, 11
-        for page_num in range(main_table_start, min(main_table_end + 1, len(pdf.pages))):
-            page = pdf.pages[page_num]
+    def _extract_all_subtables_from_page_pattern(self, page, page_num: int) -> List[SubtableItem]:
+        """
+        Extracts all subtables from a single page by scanning for reference number rows, header rows, and data rows.
+        """
+        page_subtable_items = []
+        try:
             tables = page.extract_tables()
-            for table in tables:
-                remarks_col_idx = self._find_remarks_column_index(table)
-                if remarks_col_idx is not None:
-                    for row in table:
-                        if row and remarks_col_idx < len(row) and row[remarks_col_idx]:
-                            cell_str = str(row[remarks_col_idx]).strip()
-                            if len(cell_str) < 50:
-                                # 1. Extract all reference numbers using regex (no spaces)
-                                discovered_references.update(
-                                    self._extract_complete_reference_numbers_from_text(cell_str))
-                                # 2. Also extract reference numbers with optional space (e.g., '内 9号')
+            for table_num, table in enumerate(tables):
+                i = 0
+                while i < len(table):
+                    row = table[i]
+                    # Look for reference number row
+                    ref = None
+                    for cell in row:
+                        if cell and isinstance(cell, str):
+                            import re
+                            m = re.search(r'([一-龯第])\s*(\d+)号', cell)
+                            if m:
+                                ref = f"{m.group(1)} {m.group(2)}号"
+                                break
+                            m2 = re.search(r'([一-龯第])(\d+)号', cell.replace(' ', ''))
+                            if m2:
+                                ref = f"{m2.group(1)}{m2.group(2)}号"
+                                break
+                    if not ref:
+                        i += 1
+                        continue
+                    # Look for header row in the next few rows
+                    header_row_idx, col_mapping = None, None
+                    for j in range(i + 1, min(i + 6, len(table))):
+                        if self._is_subtable_header_row(table[j]):
+                            header_row_idx = j
+                            col_mapping = self._get_subtable_column_mapping(table[j])
+                            break
+                    if header_row_idx is None or not col_mapping:
+                        i += 1
+                        continue
+                    # Data rows start after header
+                    data_start = header_row_idx + 1
+                    # Data ends at next reference number or subtable end
+                    data_end = len(table)
+                    for k in range(data_start, len(table)):
+                        # If we find another reference number row, stop
+                        found_next_ref = False
+                        for cell in table[k]:
+                            if cell and isinstance(cell, str):
                                 import re
-                                # Match kanji + optional space(s) + digits + '号'
-                                for m in re.finditer(r'([一-龯第])\s*(\d+)号', cell_str):
-                                    ref = f"{m.group(1)} {m.group(2)}号"
-                                    discovered_references.add(ref)
-                                # 3. If any known reference number is a substring, add it (for robustness)
-                                # (Optional: could scan for all possible patterns, but above covers most cases)
-        return sorted(list(discovered_references))
+                                if re.search(r'([一-龯第])\s*(\d+)号', cell) or re.search(r'([一-龯第])(\d+)号', cell.replace(' ', '')):
+                                    data_end = k
+                                    found_next_ref = True
+                                    break
+                        if found_next_ref:
+                            break
+                    data_rows = table[data_start:data_end]
+                    # Extract items from data rows
+                    page_subtable_items.extend(self._process_subtable_data_rows_with_spanning(
+                        data_rows, col_mapping, page_num, ref, data_start))
+                    i = data_end
+        except Exception as e:
+            logger.error(
+                f"Error processing page {page_num + 1} for pattern-based subtables: {e}", exc_info=True)
+        return page_subtable_items
 
     def _find_remarks_column_index(self, table: List[List]) -> Optional[int]:
         """Finds the index of the '摘要' (remarks) column."""
