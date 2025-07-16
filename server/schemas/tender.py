@@ -45,6 +45,7 @@ class ComparisonResult(BaseModel):
         None, description="Difference in quantities if applicable")
     unit_mismatch: Optional[bool] = Field(
         None, description="Whether units are different")
+    type: Literal["Main Table", "Sub Table"] = Field(..., description="Indicates if the result is from the main table or sub table")
 
 
 class ComparisonSummary(BaseModel):
@@ -71,3 +72,13 @@ class SubtableComparisonSummary(BaseModel):
         ..., description="PDF subtable items")
     excel_subtables: List[SubtableItem] = Field(
         ..., description="Excel subtable items")
+
+
+class SubtableComparisonResult(BaseModel):
+    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "MISSING", "EXTRA"] = Field(..., description="Comparison status for subtable")
+    pdf_item: Optional[SubtableItem] = Field(None, description="PDF subtable item if present")
+    excel_item: Optional[SubtableItem] = Field(None, description="Excel subtable item if present")
+    match_confidence: float = Field(..., description="Confidence score for the match (0-1)")
+    quantity_difference: Optional[float] = Field(None, description="Difference in quantities if applicable")
+    unit_mismatch: Optional[bool] = Field(None, description="Whether units are different")
+    type: Literal["Sub Table"] = Field("Sub Table", description="Indicates this result is from a sub table")

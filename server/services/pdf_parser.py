@@ -223,33 +223,54 @@ class PDFParser:
     def extract_subtables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None, reference_numbers: Optional[List[str]] = None) -> List[SubtableItem]:
         """
         Main entry point for extracting subtables from a PDF.
-        Now scans all pages in the specified range and extracts every subtable matching the pattern (reference number row, header row, data rows).
+        Only extracts subtables from pages within the specified range.
+        If no range is specified (start_page and end_page are None), returns empty list.
         """
         all_subtable_items = []
         logger.info(f"Starting PDF subtable extraction from: {pdf_path}")
         logger.info(
-            f"Page range: {start_page or 'start'} to {end_page or 'end'}")
+            f"Requested subtable page range: {start_page or 'start'} to {end_page or 'end'}")
 
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 total_pages = len(pdf.pages)
-                actual_start = (
-                    start_page - 1) if start_page is not None else 0
-                actual_end = (
-                    end_page - 1) if end_page is not None else total_pages - 1
-                actual_start = max(0, actual_start)
-                actual_end = min(total_pages - 1, actual_end)
+                logger.info(f"PDF has {total_pages} total pages")
+
+                # If no range specified, don't process any pages
+                if start_page is None or end_page is None:
+                    logger.warning(
+                        "No subtable page range specified, skipping subtable extraction")
+                    return []
+
+                # Convert to 0-based indices and validate
+                actual_start = start_page - 1
+                actual_end = end_page - 1
+
+                # Validate page range
+                if actual_start < 0 or actual_end >= total_pages:
+                    logger.warning(
+                        f"Page range {start_page}-{end_page} is outside valid range (1-{total_pages})")
+                    return []
 
                 if actual_start > actual_end:
+                    logger.warning(
+                        f"Invalid page range: start page {start_page} is after end page {end_page}")
                     return []
 
                 logger.info(
-                    f"Processing pages {actual_start + 1} to {actual_end + 1} for subtables (pattern-based)")
+                    f"Processing pages {actual_start + 1} to {actual_end + 1} for subtables")
                 for page_num in range(actual_start, actual_end + 1):
+                    logger.info(
+                        f"Extracting subtables from page {page_num + 1}")
                     page = pdf.pages[page_num]
                     page_subtables = self._extract_all_subtables_from_page_pattern(
                         page, page_num)
+                    logger.info(
+                        f"Found {len(page_subtables)} subtable items on page {page_num + 1}")
                     all_subtable_items.extend(page_subtables)
+
+                logger.info(
+                    f"Total subtable items extracted: {len(all_subtable_items)}")
 
         except Exception as e:
             logger.error(
@@ -261,6 +282,10 @@ class PDFParser:
     def _extract_all_subtables_from_page_pattern(self, page, page_num: int) -> List[SubtableItem]:
         """
         Extracts all subtables from a single page by scanning for reference number rows, header rows, and data rows.
+        A valid subtable must have:
+        1. A reference number row (e.g., '単 3号', '内 7号')
+        2. A header row with required columns (名称, 単位, 数量)
+        3. Data rows with valid content
         """
         page_subtable_items = []
         try:
@@ -269,32 +294,40 @@ class PDFParser:
                 i = 0
                 while i < len(table):
                     row = table[i]
-                    # Look for reference number row
+                    # Look for reference number row with strict pattern
                     ref = None
                     for cell in row:
                         if cell and isinstance(cell, str):
-                            import re
-                            m = re.search(r'([一-龯第])\s*(\d+)号', cell)
-                            if m:
-                                ref = f"{m.group(1)} {m.group(2)}号"
-                                break
-                            m2 = re.search(r'([一-龯第])(\d+)号', cell.replace(' ', ''))
-                            if m2:
-                                ref = f"{m2.group(1)}{m2.group(2)}号"
-                                break
+                            # More strict pattern for reference numbers
+                            patterns = [
+                                r'([単内道])\s*(\d+)号',  # 単3号, 内7号, 道1号
+                                r'([単内道])(\d+)号'      # Same without spaces
+                            ]
+                            for pattern in patterns:
+                                m = re.search(pattern, cell.replace(' ', ''))
+                                if m:
+                                    ref = f"{m.group(1)}{m.group(2)}号"
+                                    break
                     if not ref:
                         i += 1
                         continue
-                    # Look for header row in the next few rows
+
+                    # Look for header row with required columns
                     header_row_idx, col_mapping = None, None
                     for j in range(i + 1, min(i + 6, len(table))):
                         if self._is_subtable_header_row(table[j]):
-                            header_row_idx = j
-                            col_mapping = self._get_subtable_column_mapping(table[j])
-                            break
+                            # Verify all required columns are present
+                            required_cols = {"名称・規格", "単位", "数量"}
+                            found_cols = set(col_mapping.keys()) if (
+                                col_mapping := self._get_subtable_column_mapping(table[j])) else set()
+                            if required_cols.issubset(found_cols):
+                                header_row_idx = j
+                                break
+
                     if header_row_idx is None or not col_mapping:
                         i += 1
                         continue
+
                     # Data rows start after header
                     data_start = header_row_idx + 1
                     # Data ends at next reference number or subtable end
@@ -304,18 +337,28 @@ class PDFParser:
                         found_next_ref = False
                         for cell in table[k]:
                             if cell and isinstance(cell, str):
-                                import re
-                                if re.search(r'([一-龯第])\s*(\d+)号', cell) or re.search(r'([一-龯第])(\d+)号', cell.replace(' ', '')):
+                                if any(re.search(pattern, cell.replace(' ', '')) for pattern in patterns):
                                     data_end = k
                                     found_next_ref = True
                                     break
                         if found_next_ref:
                             break
+                        # Also stop at subtable end markers
+                        if self._is_subtable_end_row(table[k]):
+                            data_end = k
+                            break
+
                     data_rows = table[data_start:data_end]
-                    # Extract items from data rows
-                    page_subtable_items.extend(self._process_subtable_data_rows_with_spanning(
-                        data_rows, col_mapping, page_num, ref, data_start))
+                    # Only process if we have valid data rows
+                    if len(data_rows) > 0:
+                        # Extract items from data rows
+                        items = self._process_subtable_data_rows_with_spanning(
+                            data_rows, col_mapping, page_num, ref, data_start)
+                        # Only add if we found valid items
+                        if items:
+                            page_subtable_items.extend(items)
                     i = data_end
+
         except Exception as e:
             logger.error(
                 f"Error processing page {page_num + 1} for pattern-based subtables: {e}", exc_info=True)

@@ -343,30 +343,24 @@ async def compare_tender_files_missing_only(
     excel_file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    sheet_name: Optional[str] = Form(None)
+    sheet_name: Optional[str] = Form(None),
+    pdf_subtable_start_page: Optional[int] = Form(None),
+    pdf_subtable_end_page: Optional[int] = Form(None)
 ):
     """
-    Compare tender files and return only the missing items (PDF items not in Excel).
-    Optimized endpoint for specific use case.
-
-    Args:
-        pdf_file: PDF tender document
-        excel_file: Excel proposal document
-        start_page: Starting page number for PDF extraction (optional)
-        end_page: Ending page number for PDF extraction (optional)
-        sheet_name: Specific Excel sheet name to extract from (optional)
+    Compare tender files and return only the missing items (PDF items not in Excel), including both main table and sub table.
     """
     logger.info("=== STARTING MISSING ITEMS COMPARISON ===")
-    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"PDF main table page range: {start_page} to {end_page}")
+    logger.info(f"PDF subtable page range: {pdf_subtable_start_page} to {pdf_subtable_end_page}")
     logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
 
-    # Same file processing as main endpoint
     if not pdf_file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="PDF file required")
     if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Excel file required")
 
-    # Validate page range
+    # Validate main table page range
     if start_page is not None and start_page < 1:
         raise HTTPException(status_code=400, detail="Start page must be >= 1")
     if end_page is not None and end_page < 1:
@@ -375,14 +369,21 @@ async def compare_tender_files_missing_only(
         raise HTTPException(
             status_code=400, detail="Start page cannot be greater than end page")
 
+    # Validate subtable page range
+    if pdf_subtable_start_page is not None and pdf_subtable_start_page < 1:
+        raise HTTPException(status_code=400, detail="Subtable start page must be >= 1")
+    if pdf_subtable_end_page is not None and pdf_subtable_end_page < 1:
+        raise HTTPException(status_code=400, detail="Subtable end page must be >= 1")
+    if pdf_subtable_start_page is not None and pdf_subtable_end_page is not None and pdf_subtable_start_page > pdf_subtable_end_page:
+        raise HTTPException(
+            status_code=400, detail="Subtable start page cannot be greater than end page")
+
     pdf_fd = None
     pdf_path = None
 
     try:
-        # Process files
         pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='tender_')
         pdf_content = await pdf_file.read()
-
         with os.fdopen(pdf_fd, 'wb') as f:
             f.write(pdf_content)
         pdf_fd = None
@@ -390,49 +391,73 @@ async def compare_tender_files_missing_only(
         excel_content = await excel_file.read()
         excel_buffer = BytesIO(excel_content)
 
-        # Parse files with parameters
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page)
 
-        # Extract items from Excel with sheet filter
-        logger.info("Extracting items from Excel with specified parameters...")
         if sheet_name:
-            # Use the new standalone corrected main table extraction for specific sheet
             excel_table_extractor = ExcelTableExtractorService()
             excel_items = excel_table_extractor.extract_main_table_from_buffer(
                 excel_buffer, sheet_name)
-            logger.info(
-                f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
         else:
-            # Use original method for all sheets
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
                 excel_buffer, sheet_name)
-            logger.info(f"Total Excel items extracted: {len(excel_items)}")
+
+        # --- Subtable extraction ---
+        # For subtables, use the same sheet_name as main table for Excel
+        excel_table_extractor = ExcelTableExtractorService()
+        main_table_items = excel_items
+        pdf_subtables = pdf_parser.extract_subtables_with_range(
+            pdf_path,
+            pdf_subtable_start_page,
+            pdf_subtable_end_page
+        )
+        excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
+            excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
 
         excel_buffer.close()
 
-        # Get only missing items
         matcher = Matcher()
-        missing_items = matcher.get_missing_items_only(pdf_items, excel_items)
+        # Main table missing items
+        main_missing_items = matcher.get_missing_items_only(
+            pdf_items, excel_items)
+        # Subtable missing items (use only those with status == 'MISSING')
+        subtable_results = matcher.compare_subtable_items(
+            pdf_subtables, excel_subtables)
+        subtable_missing_items = [
+            r for r in subtable_results if r.status == 'MISSING']
 
-        # Return simplified response
+        # Format for frontend: add 'type' field
+        missing_items = [
+            {
+                "item_key": item.item_key,
+                "raw_fields": item.raw_fields,
+                "quantity": item.quantity,
+                "unit": item.unit,
+                "page_number": item.page_number,
+                "type": "Main Table"
+            }
+            for item in main_missing_items
+        ] + [
+            {
+                "item_key": r.pdf_item.item_key,
+                "raw_fields": r.pdf_item.raw_fields,
+                "quantity": r.pdf_item.quantity,
+                "unit": r.pdf_item.unit,
+                "page_number": r.pdf_item.page_number,
+                "reference_number": r.pdf_item.reference_number,
+                "type": "Sub Table"
+            }
+            for r in subtable_missing_items if r.pdf_item is not None
+        ]
+
         return {
             "total_pdf_items": len(pdf_items),
             "total_excel_items": len(excel_items),
             "missing_items_count": len(missing_items),
-            "missing_items": [
-                {
-                    "item_key": item.item_key,
-                    "raw_fields": item.raw_fields,
-                    "quantity": item.quantity,
-                    "unit": item.unit,
-                    "page_number": item.page_number
-                }
-                for item in missing_items
-            ],
+            "missing_items": missing_items,
             "pdf_extracted_items": [
                 {
                     "item_key": item.item_key,
@@ -486,30 +511,24 @@ async def compare_tender_files_mismatches_only(
     excel_file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    sheet_name: Optional[str] = Form(None)
+    sheet_name: Optional[str] = Form(None),
+    pdf_subtable_start_page: Optional[int] = Form(None),
+    pdf_subtable_end_page: Optional[int] = Form(None)
 ):
     """
-    Compare tender files and return only the quantity mismatches.
-    Optimized endpoint for specific use case.
-
-    Args:
-        pdf_file: PDF tender document
-        excel_file: Excel proposal document
-        start_page: Starting page number for PDF extraction (optional)
-        end_page: Ending page number for PDF extraction (optional)
-        sheet_name: Specific Excel sheet name to extract from (optional)
+    Compare tender files and return only the quantity mismatches, including both main table and sub table.
     """
     logger.info("=== STARTING QUANTITY MISMATCHES COMPARISON ===")
-    logger.info(f"PDF page range: {start_page} to {end_page}")
+    logger.info(f"PDF main table page range: {start_page} to {end_page}")
+    logger.info(f"PDF subtable page range: {pdf_subtable_start_page} to {pdf_subtable_end_page}")
     logger.info(f"Excel sheet: {sheet_name or 'All sheets'}")
 
-    # Same file processing as main endpoint
     if not pdf_file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="PDF file required")
     if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Excel file required")
 
-    # Validate page range
+    # Validate main table page range
     if start_page is not None and start_page < 1:
         raise HTTPException(status_code=400, detail="Start page must be >= 1")
     if end_page is not None and end_page < 1:
@@ -518,14 +537,21 @@ async def compare_tender_files_mismatches_only(
         raise HTTPException(
             status_code=400, detail="Start page cannot be greater than end page")
 
+    # Validate subtable page range
+    if pdf_subtable_start_page is not None and pdf_subtable_start_page < 1:
+        raise HTTPException(status_code=400, detail="Subtable start page must be >= 1")
+    if pdf_subtable_end_page is not None and pdf_subtable_end_page < 1:
+        raise HTTPException(status_code=400, detail="Subtable end page must be >= 1")
+    if pdf_subtable_start_page is not None and pdf_subtable_end_page is not None and pdf_subtable_start_page > pdf_subtable_end_page:
+        raise HTTPException(
+            status_code=400, detail="Subtable start page cannot be greater than end page")
+
     pdf_fd = None
     pdf_path = None
 
     try:
-        # Process files
         pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='tender_')
         pdf_content = await pdf_file.read()
-
         with os.fdopen(pdf_fd, 'wb') as f:
             f.write(pdf_content)
         pdf_fd = None
@@ -533,63 +559,93 @@ async def compare_tender_files_mismatches_only(
         excel_content = await excel_file.read()
         excel_buffer = BytesIO(excel_content)
 
-        # Parse files with parameters
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page)
 
-        # Extract items from Excel with sheet filter
-        logger.info("Extracting items from Excel with specified parameters...")
         if sheet_name:
-            # Use the new standalone corrected main table extraction for specific sheet
             excel_table_extractor = ExcelTableExtractorService()
             excel_items = excel_table_extractor.extract_main_table_from_buffer(
                 excel_buffer, sheet_name)
-            logger.info(
-                f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
         else:
-            # Use original method for all sheets
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
                 excel_buffer, sheet_name)
-            logger.info(f"Total Excel items extracted: {len(excel_items)}")
+
+        # --- Subtable extraction ---
+        excel_table_extractor = ExcelTableExtractorService()
+        main_table_items = excel_items
+        pdf_subtables = pdf_parser.extract_subtables_with_range(
+            pdf_path,
+            pdf_subtable_start_page,
+            pdf_subtable_end_page
+        )
+        excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
+            excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
 
         excel_buffer.close()
 
-        # Get only mismatched items
         matcher = Matcher()
-        mismatched_results = matcher.get_mismatched_items_only(
+        # Main table quantity mismatches
+        main_mismatched_results = matcher.get_mismatched_items_only(
             pdf_items, excel_items)
-        unit_mismatched_results = matcher.get_unit_mismatched_items_only(
-            pdf_items, excel_items)
+        # Subtable quantity mismatches
+        subtable_results = matcher.compare_subtable_items(
+            pdf_subtables, excel_subtables)
+        subtable_mismatches = [
+            r for r in subtable_results if r.status == 'QUANTITY_MISMATCH']
 
-        # Return simplified response
+        # Format for frontend: add 'type' field
+        quantity_mismatches = [
+            {
+                "pdf_item": {
+                    "item_key": r.pdf_item.item_key,
+                    "quantity": r.pdf_item.quantity,
+                    "unit": r.pdf_item.unit,
+                    "raw_fields": r.pdf_item.raw_fields,
+                    "page_number": r.pdf_item.page_number
+                } if r.pdf_item else None,
+                "excel_item": {
+                    "item_key": r.excel_item.item_key,
+                    "quantity": r.excel_item.quantity,
+                    "unit": r.excel_item.unit,
+                    "raw_fields": r.excel_item.raw_fields,
+                    "page_number": r.excel_item.page_number
+                } if r.excel_item else None,
+                "quantity_difference": r.quantity_difference,
+                "match_confidence": r.match_confidence,
+                "type": r.type
+            }
+            for r in subtable_mismatches
+        ] + [
+            {
+                "pdf_item": {
+                    "item_key": result.pdf_item.item_key,
+                    "quantity": result.pdf_item.quantity,
+                    "unit": result.pdf_item.unit,
+                    "raw_fields": result.pdf_item.raw_fields,
+                    "page_number": result.pdf_item.page_number
+                } if result.pdf_item else None,
+                "excel_item": {
+                    "item_key": result.excel_item.item_key,
+                    "quantity": result.excel_item.quantity,
+                    "unit": result.excel_item.unit,
+                    "raw_fields": result.excel_item.raw_fields,
+                    "page_number": result.excel_item.page_number
+                } if result.excel_item else None,
+                "quantity_difference": result.quantity_difference,
+                "match_confidence": result.match_confidence,
+                "type": "Main Table"
+            }
+            for result in main_mismatched_results
+        ]
+
         return {
             "total_pdf_items": len(pdf_items),
             "total_excel_items": len(excel_items),
-            "quantity_mismatches_count": len(mismatched_results),
-            "quantity_mismatches": [
-                {
-                    "pdf_item": {
-                        "item_key": result.pdf_item.item_key,
-                        "quantity": result.pdf_item.quantity,
-                        "unit": result.pdf_item.unit,
-                        "raw_fields": result.pdf_item.raw_fields,
-                        "page_number": result.pdf_item.page_number
-                    },
-                    "excel_item": {
-                        "item_key": result.excel_item.item_key,
-                        "quantity": result.excel_item.quantity,
-                        "unit": result.excel_item.unit,
-                        "raw_fields": result.excel_item.raw_fields,
-                        "page_number": result.excel_item.page_number
-                    },
-                    "quantity_difference": result.quantity_difference,
-                    "match_confidence": result.match_confidence
-                }
-                for result in mismatched_results
-            ],
+            "quantity_mismatches_count": len(quantity_mismatches),
+            "quantity_mismatches": quantity_mismatches,
             "pdf_extracted_items": [
                 {
                     "item_key": item.item_key,
@@ -881,7 +937,8 @@ async def compare_subtables(
         excel_table_extractor = ExcelTableExtractorService()
         main_table_items = excel_table_extractor.extract_main_table_from_buffer(
             excel_buffer, main_sheet_name)
-        logger.info(f"Extracted {len(main_table_items)} main table items for reference discovery")
+        logger.info(
+            f"Extracted {len(main_table_items)} main table items for reference discovery")
 
         # Extract reference numbers from main table's 摘要 column
         reference_numbers = []
@@ -889,22 +946,27 @@ async def compare_subtables(
             remarks = item.raw_fields.get('摘要', '')
             if remarks and remarks.strip():
                 reference_numbers.append(remarks.strip())
-        
+
         # Remove duplicates and filter valid reference numbers
         unique_references = list(set(reference_numbers))
-        valid_references = [ref for ref in unique_references if ref and ('号' in ref or '単' in ref)]
-        
-        logger.info(f"Found {len(valid_references)} unique reference numbers from main table: {valid_references[:10]}...")
+        valid_references = [
+            ref for ref in unique_references if ref and ('号' in ref or '単' in ref)]
 
-        # IMPORTANT: If no valid references found but page range is specified, 
+        logger.info(
+            f"Found {len(valid_references)} unique reference numbers from main table: {valid_references[:10]}...")
+
+        # IMPORTANT: If no valid references found but page range is specified,
         # we should still only process the specified page range without discovery
         if not valid_references and (pdf_subtable_start_page is not None or pdf_subtable_end_page is not None):
-            logger.warning("No valid reference numbers found from main table, but page range is specified.")
-            logger.warning("Will process specified page range without reference filtering.")
+            logger.warning(
+                "No valid reference numbers found from main table, but page range is specified.")
+            logger.warning(
+                "Will process specified page range without reference filtering.")
             # Use None to indicate no specific reference filtering, but still respect page range
             valid_references = None
         elif not valid_references:
-            logger.warning("No valid reference numbers found from main table. PDF extraction may use discovery mode.")
+            logger.warning(
+                "No valid reference numbers found from main table. PDF extraction may use discovery mode.")
 
         # Extract subtables from PDF with page range and reference numbers
         logger.info("Extracting subtables from PDF with reference numbers...")
@@ -913,7 +975,8 @@ async def compare_subtables(
         logger.info(f"Total PDF subtables extracted: {len(pdf_subtables)}")
 
         # Extract subtables from Excel using the new boundary-based logic
-        logger.info("Extracting subtables from Excel using boundary-based logic...")
+        logger.info(
+            "Extracting subtables from Excel using boundary-based logic...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, main_sheet_name, main_table_items)
         logger.info(f"Total Excel subtables extracted: {len(excel_subtables)}")

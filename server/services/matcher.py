@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Tuple
 from rapidfuzz import process, fuzz
-from ..schemas.tender import TenderItem, ComparisonResult, ComparisonSummary
+from ..schemas.tender import TenderItem, SubtableItem, ComparisonResult, ComparisonSummary, SubtableComparisonResult
 from .normalizer import Normalizer
 
 # Configure logging
@@ -63,6 +63,73 @@ class Matcher:
 
         return summary
 
+    def compare_subtable_items(self, pdf_subtables: List[SubtableItem], excel_subtables: List[SubtableItem]) -> List[SubtableComparisonResult]:
+        """
+        Compare subtable items between PDF and Excel, focusing on mismatches and missing items.
+        Matching is done by (item_key, reference_number).
+        """
+        # Normalize keys for matching
+        def make_key(item):
+            return (item.item_key.strip() if item.item_key else '', item.reference_number.strip() if item.reference_number else '')
+
+        pdf_dict = {make_key(item): item for item in pdf_subtables}
+        excel_dict = {make_key(item): item for item in excel_subtables}
+
+        results = []
+        matched_excel_keys = set()
+
+        # Compare PDF subtables to Excel subtables
+        for key, pdf_item in pdf_dict.items():
+            if key in excel_dict:
+                excel_item = excel_dict[key]
+                # Compare quantity and unit
+                quantity_diff = (excel_item.quantity or 0) - \
+                    (pdf_item.quantity or 0)
+                has_quantity_mismatch = abs(quantity_diff) >= 0.001
+                pdf_unit = (pdf_item.unit or '').strip()
+                excel_unit = (excel_item.unit or '').strip()
+                has_unit_mismatch = pdf_unit != excel_unit
+                if has_quantity_mismatch:
+                    status = "QUANTITY_MISMATCH"
+                elif has_unit_mismatch:
+                    status = "UNIT_MISMATCH"
+                else:
+                    status = "OK"
+                results.append(SubtableComparisonResult(
+                    status=status,
+                    pdf_item=pdf_item,
+                    excel_item=excel_item,
+                    match_confidence=1.0,
+                    quantity_difference=quantity_diff if has_quantity_mismatch else None,
+                    unit_mismatch=has_unit_mismatch if has_unit_mismatch else None,
+                    type="Sub Table"
+                ))
+                matched_excel_keys.add(key)
+            else:
+                # Missing in Excel
+                results.append(SubtableComparisonResult(
+                    status="MISSING",
+                    pdf_item=pdf_item,
+                    excel_item=None,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Sub Table"
+                ))
+        # Find extra items in Excel
+        for key, excel_item in excel_dict.items():
+            if key not in matched_excel_keys:
+                results.append(SubtableComparisonResult(
+                    status="EXTRA",
+                    pdf_item=None,
+                    excel_item=excel_item,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Sub Table"
+                ))
+        return results
+
     def _normalize_items(self, items: List[TenderItem], source: str) -> Dict[str, TenderItem]:
         """
         Normalize a list of items into a dictionary with normalized keys.
@@ -118,7 +185,9 @@ class Matcher:
             pdf_item=pdf_item,
             excel_item=None,
             match_confidence=0.0,
-            quantity_difference=None
+            quantity_difference=None,
+            unit_mismatch=None,
+            type="Main Table"
         )
 
     def _find_fuzzy_match(self, pdf_key: str, excel_normalized: Dict[str, TenderItem],
@@ -243,7 +312,8 @@ class Matcher:
             excel_item=excel_item,
             match_confidence=confidence,
             quantity_difference=actual_quantity_diff,
-            unit_mismatch=has_unit_mismatch
+            unit_mismatch=has_unit_mismatch,
+            type="Main Table"
         )
 
     def _find_extra_excel_items(self, excel_normalized: Dict[str, TenderItem],
@@ -262,7 +332,9 @@ class Matcher:
                     pdf_item=None,
                     excel_item=excel_item,
                     match_confidence=0.0,
-                    quantity_difference=None
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Main Table"
                 ))
 
         return extra_results

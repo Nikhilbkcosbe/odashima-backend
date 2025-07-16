@@ -125,7 +125,7 @@ async def login(loginData: LoginInputDataModel, request: Request):
             httponly=True,
             samesite="Strict",
             secure=True,
-            # domain=".cosbe.inc",
+            domain=".cosbe.inc",
             path="/"
         )
 
@@ -136,7 +136,7 @@ async def login(loginData: LoginInputDataModel, request: Request):
             max_age=7776000,  # 90 days
             samesite="Strict",
             secure=True,
-            # domain=".cosbe.inc",
+            domain=".cosbe.inc",
             path="/"
         )
 
