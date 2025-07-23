@@ -66,11 +66,17 @@ class Matcher:
     def compare_subtable_items(self, pdf_subtables: List[SubtableItem], excel_subtables: List[SubtableItem]) -> List[SubtableComparisonResult]:
         """
         Compare subtable items between PDF and Excel, focusing on mismatches and missing items.
-        Matching is done by (item_key, reference_number).
+        ENHANCED: Uses normalization for better matching (similar to main table logic).
         """
-        # Normalize keys for matching
+        # ENHANCED: Normalize keys for matching using the normalizer
         def make_key(item):
-            return (item.item_key.strip() if item.item_key else '', item.reference_number.strip() if item.reference_number else '')
+            # Normalize item name using the normalizer
+            normalized_item_key = self.normalizer.normalize_item(item.item_key) if item.item_key else ''
+            
+            # Normalize reference number (handle spacing issues like "単 1号" vs "単1号")
+            normalized_ref = item.reference_number.strip().replace(' ', '').replace('　', '') if item.reference_number else ''
+            
+            return (normalized_item_key, normalized_ref)
 
         pdf_dict = {make_key(item): item for item in pdf_subtables}
         excel_dict = {make_key(item): item for item in excel_subtables}
