@@ -461,3 +461,99 @@ class Matcher:
 
         logger.info(f"Found {len(unit_mismatched_results)} unit mismatches")
         return unit_mismatched_results
+
+    def get_extra_items_only(self, pdf_items: List[TenderItem], excel_items: List[TenderItem]) -> List[TenderItem]:
+        """
+        Quick method to get only the extra items (Excel items not found in PDF).
+        This compares main table items only.
+        """
+        logger.info("Getting extra main table items only...")
+
+        comparison_summary = self.compare_items(pdf_items, excel_items)
+
+        extra_items = []
+        for result in comparison_summary.results:
+            if result.status == "EXTRA":
+                extra_items.append(result.excel_item)
+
+        logger.info(f"Found {len(extra_items)} extra main table items")
+        return extra_items
+
+    def get_extra_subtable_items_only(self, pdf_subtables: List[SubtableItem], excel_subtables: List[SubtableItem]) -> List[SubtableItem]:
+        """
+        Quick method to get only the extra subtable items (Excel subtable items not found in PDF subtables).
+        """
+        logger.info("Getting extra subtable items only...")
+
+        subtable_results = self.compare_subtable_items(pdf_subtables, excel_subtables)
+
+        extra_subtable_items = []
+        for result in subtable_results:
+            if result.status == "EXTRA":
+                extra_subtable_items.append(result.excel_item)
+
+        logger.info(f"Found {len(extra_subtable_items)} extra subtable items")
+        return extra_subtable_items
+
+    def get_extra_items_only_simplified(self, pdf_items: List[TenderItem], excel_items: List[TenderItem]) -> List[TenderItem]:
+        """
+        Simplified method to get only the extra items (Excel items not found in PDF).
+        Compares ONLY item name, quantity, and unit as requested by the user.
+        Uses the improved normalizer to handle complex characters properly.
+        """
+        logger.info("Getting extra main table items with simplified matching...")
+
+        def items_match(pdf_item: TenderItem, excel_item: TenderItem) -> bool:
+            """Check if items match based only on name, quantity, and unit"""
+            # Compare normalized item names using improved normalizer
+            pdf_name = self.normalizer.normalize_item(pdf_item.item_key)
+            excel_name = self.normalizer.normalize_item(excel_item.item_key)
+            
+            # Check name similarity (exact match or very close)
+            names_match = (pdf_name == excel_name or 
+                          pdf_name in excel_name or 
+                          excel_name in pdf_name or
+                          (len(pdf_name) > 10 and len(excel_name) > 10 and 
+                           abs(len(pdf_name) - len(excel_name)) <= 2 and 
+                           pdf_name[:10] == excel_name[:10]))
+            
+            if not names_match:
+                logger.debug(f"Names don't match: PDF='{pdf_name}' vs Excel='{excel_name}'")
+                return False
+                
+            # Compare quantities (with small tolerance)
+            quantity_match = abs(pdf_item.quantity - excel_item.quantity) < 0.001
+            
+            if not quantity_match:
+                logger.debug(f"Quantities don't match: PDF={pdf_item.quantity} vs Excel={excel_item.quantity}")
+                return False
+            
+            # Compare units (normalize and compare)
+            pdf_unit = self.normalizer.normalize_item(pdf_item.unit or "")
+            excel_unit = self.normalizer.normalize_item(excel_item.unit or "")
+            unit_match = pdf_unit == excel_unit
+            
+            if not unit_match:
+                logger.debug(f"Units don't match: PDF='{pdf_unit}' vs Excel='{excel_unit}'")
+                return False
+            
+            return True
+
+        # Find Excel items that don't have a matching PDF item
+        extra_items = []
+        
+        for excel_item in excel_items:
+            found_match = False
+            
+            for pdf_item in pdf_items:
+                if items_match(pdf_item, excel_item):
+                    found_match = True
+                    logger.debug(f"Found match: Excel '{excel_item.item_key}' matches PDF '{pdf_item.item_key}'")
+                    break
+            
+            if not found_match:
+                extra_items.append(excel_item)
+                logger.info(f"Extra item found: '{excel_item.item_key}' (qty: {excel_item.quantity}, unit: {excel_item.unit})")
+
+        logger.info(f"Found {len(extra_items)} extra main table items using simplified matching")
+        return extra_items

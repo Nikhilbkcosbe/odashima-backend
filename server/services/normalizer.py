@@ -84,9 +84,9 @@ class Normalizer:
         normalized = re.sub(r'[\s　\u3000]+', '', normalized)
 
         # Keep alphanumeric, Japanese characters, and important technical symbols
-        # Preserve × (multiplication), ✕ (cross), and numerical indicators like ２, ３, etc.
+        # Preserve × (multiplication), ✕ (cross), φ (phi), * (asterisk), ~ (wave dash), commas, and other technical symbols
         normalized = re.sub(
-            r'[^\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF×✕]', '', normalized)
+            r'[^\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAFφΦ×✕*～〜,，、。]', '', normalized)
 
         # Remove common noise words/characters but preserve numerical suffixes
         noise_patterns = [

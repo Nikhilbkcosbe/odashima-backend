@@ -178,7 +178,7 @@ class PDFParser:
         return not any(cell and str(cell).strip() for cell in row)
 
     def _create_item_key_from_fields(self, raw_fields: Dict[str, str]) -> str:
-        """Creates a concatenated item key."""
+        """Creates a concatenated item key using space concatenation (consistent with Excel)."""
         key_fields = ["工事区分・工種・種別・細別", "摘要"]
         base_key = next(
             (raw_fields[f] for f in key_fields if f in raw_fields and raw_fields[f]), None)
@@ -186,8 +186,9 @@ class PDFParser:
             base_key = next((v for k, v in raw_fields.items() if v and k not in [
                             "単位", "数量", "単価", "金額", "規格"]), "")
 
+        # Use space concatenation instead of + to match Excel behavior
         if "規格" in raw_fields and raw_fields["規格"]:
-            return f"{base_key} + {raw_fields['規格']}"
+            return f"{base_key} {raw_fields['規格']}".strip()
         return base_key
 
     def _find_header_row(self, table: List[List]) -> Tuple[Optional[List], int]:
