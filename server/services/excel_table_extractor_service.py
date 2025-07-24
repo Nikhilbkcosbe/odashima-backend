@@ -15,10 +15,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-# Debug: Check SubtableItem at import time
-# print(f"DEBUG: SubtableItem type at import: {type(SubtableItem)}")
-# print(
-#     f"DEBUG: SubtableItem module at import: {getattr(SubtableItem, '__module__', None)}")
+
 # print(
 #     f"DEBUG: SubtableItem fields at import: {getattr(SubtableItem, '__fields__', None)}")
 
@@ -434,7 +431,7 @@ class ExcelTableExtractorService:
                 # UPDATED: Treat "計" as definitive subtable end marker
                 if cell_str == "計":
                     return True
-                # Also check for other definitive end patterns  
+                # Also check for other definitive end patterns
                 if any(pattern in cell_str for pattern in ["合計", "総計", "全計", "最終計"]):
                     return True
 
@@ -609,6 +606,7 @@ class ExcelTableExtractorService:
     def _extract_item_with_data(self, extractor, item_row: int, item_name: str, name_col: int, unit_col: int, quantity_col: int) -> Dict[str, Any]:
         """
         Extract a logical item starting from the item name row, looking for unit/quantity data in subsequent rows.
+        ENHANCED: More permissive unit extraction to capture all actual units.
         """
         combined_name = item_name
         combined_unit = ""
@@ -653,6 +651,47 @@ class ExcelTableExtractorService:
 
                 end_row = check_row
                 break
+
+        # ENHANCED: If no unit found in expected location, scan nearby cells more aggressively
+        if not combined_unit:
+            # Check adjacent columns around the unit column for units
+            for row_to_check in range(item_row, min(item_row + 5, extractor.worksheet.max_row + 1)):
+                for col_offset in [-2, -1, 1, 2, 3]:  # Check columns around unit column
+                    check_col = unit_col + 1 + col_offset  # Convert to 1-based and add offset
+                    if check_col > 0 and check_col <= extractor.worksheet.max_column:
+                        cell_value = extractor.get_cell_value(
+                            row_to_check, check_col)
+                        if cell_value and isinstance(cell_value, str):
+                            cell_str = cell_value.strip()
+                            # ENHANCED: Much more permissive unit detection
+                            if (cell_str and
+                                len(cell_str) <= 15 and  # Not too long
+                                # Not a pure number
+                                not cell_str.replace('.', '').replace(',', '').isdigit() and
+                                    check_col != name_col + 1):  # Not from name column
+                                combined_unit = cell_str
+                                logger.debug(
+                                    f"Found unit '{combined_unit}' in adjacent column {check_col} for item '{item_name}'")
+                                break
+                if combined_unit:
+                    break
+
+        # ENHANCED: If still no unit, try scanning the item row itself for potential units
+        if not combined_unit:
+            for col in range(1, extractor.worksheet.max_column + 1):
+                if col != name_col + 1:  # Skip name column
+                    cell_value = extractor.get_cell_value(item_row, col)
+                    if cell_value and isinstance(cell_value, str):
+                        cell_str = cell_value.strip()
+                        # Very permissive unit detection for single row scan
+                        if (cell_str and
+                            # Shorter length for same-row units
+                            len(cell_str) <= 10 and
+                                not cell_str.replace('.', '').replace(',', '').isdigit()):  # Not a pure number
+                            combined_unit = cell_str
+                            logger.debug(
+                                f"Found unit '{combined_unit}' in same row column {col} for item '{item_name}'")
+                            break
 
         return {
             'name': combined_name.strip(),
@@ -770,7 +809,7 @@ class ExcelTableExtractorService:
                     import re
                     if re.search(r'単\d+号', cell_str):
                         return True
-                
+
                 # UPDATED: Treat "計" as definitive subtable end marker
                 if cell_str == "計":
                     return True
@@ -839,7 +878,7 @@ class ExcelTableExtractorService:
                 import re
                 if re.search(r'単\d+号', cell_value):
                     return row - 1  # End at the row before the next reference
-            
+
             # UPDATED: Check for "計" (total) marker in any column of this row
             for col in range(1, min(ws.max_column + 1, 10)):
                 check_cell_value = extractor.get_cell_value(row, col)
@@ -851,7 +890,7 @@ class ExcelTableExtractorService:
                     # Also check for other definitive end patterns
                     if any(pattern in cell_str for pattern in ["合計", "総計", "全計", "最終計"]):
                         return row - 1  # End at the row before the total row
-                        
+
         return max_row  # If no more references or totals, end at last row
 
     def _extract_using_standalone_logic(self, file_path: str, sheet_name: str) -> List[TenderItem]:
@@ -1039,27 +1078,12 @@ class ExcelTableExtractorService:
                 "reference_number": ref_number,
                 "sheet_name": sheet_name,
             }
-            print(
-                f"DEBUG: About to create SubtableItem with dict: {item_dict}")
             try:
                 item = SubtableItem(**item_dict)
                 items.append(item)
             except Exception as e:
-                print(f"ERROR: Failed to create SubtableItem: {e}")
+                logger.error(f"Failed to create SubtableItem: {e}")
         return items
-
-    def _extract_using_original_logic(self, excel_buffer: BytesIO, sheet_name: str) -> List[TenderItem]:
-        """
-        Fallback method that uses the original Excel parser logic when standalone logic fails.
-        This ensures we always get some results even if the standalone logic has issues.
-        """
-        try:
-            from .excel_parser import ExcelParser
-            excel_parser = ExcelParser()
-            return excel_parser.extract_items_from_buffer_with_sheet(excel_buffer, sheet_name)
-        except Exception as e:
-            logger.error(f"Error in fallback extraction: {e}")
-            return []
 
     def _parse_quantity(self, quantity_str: str) -> float:
         """
@@ -1079,17 +1103,3 @@ class ExcelTableExtractorService:
         except ValueError:
             # If it's not a valid number, return 0.0
             return 0.0
-
-
-# Keep the old class for backward compatibility but mark as deprecated
-class ExcelTableExtractorCorrected:
-    """
-    DEPRECATED: This class is kept for backward compatibility.
-    Use the standalone excel_table_extractor_corrected.py file instead.
-    """
-
-    def __init__(self, file_path: str, sheet_name: str):
-        logger.warning(
-            "ExcelTableExtractorCorrected is deprecated. Use standalone extractor instead.")
-        raise NotImplementedError(
-            "Use the standalone excel_table_extractor_corrected.py file instead")

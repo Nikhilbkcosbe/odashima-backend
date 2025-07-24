@@ -992,6 +992,7 @@ class ExcelParser:
     def _extract_unit_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
         """
         SIMPLIFIED: Extract unit focusing on the main unit column and hierarchical columns.
+        FIXED: More permissive unit extraction to capture all actual units.
         Looks for: 単位 and variations with spaces
         """
         # Priority 1: Main unit columns
@@ -1017,10 +1018,28 @@ class ExcelParser:
             if "hierarchical_item" in col_name:
                 if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
                     value = str(row.iloc[col_idx]).strip()
+                    # FIXED: Much more permissive - accept most non-empty content as potential units
                     if (value and value not in ["", "None", "nan", "0"] and
                         not all(c in " 　\t\n\r" for c in value) and
-                            self._is_likely_unit(value)):
+                        len(value) <= 15 and  # Not too long
+                            not value.replace('.', '').replace(',', '').isdigit()):  # Not a pure number
                         return value
+
+        # Priority 3: ENHANCED - If still no unit found, scan entire row for potential units
+        name_col_idx = col_mapping.get(
+            "工事区分・工種・種別・細別", col_mapping.get("規格", -1))
+        quantity_col_idx = col_mapping.get("数量", -1)
+
+        for col_idx, cell in enumerate(row):
+            if pd.notna(cell) and col_idx not in [name_col_idx, quantity_col_idx]:
+                value = str(cell).strip()
+                if (value and value not in ["", "None", "nan", "0"] and
+                    not all(c in " 　\t\n\r" for c in value) and
+                    len(value) <= 15 and  # Not too long
+                        not value.replace('.', '').replace(',', '').isdigit()):  # Not a pure number
+                    logger.debug(
+                        f"Found unit '{value}' in column {col_idx} via full row scan")
+                    return value
 
         return ""
 
@@ -1748,6 +1767,7 @@ class ExcelParser:
     def _extract_unit(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
         """
         Extract unit from unit column - handles Japanese Excel patterns where unit might be in different cells
+        FIXED: More permissive unit extraction to capture all actual units.
         """
         unit_columns = ["単位", "Unit", "units"]
 
@@ -1772,10 +1792,27 @@ class ExcelParser:
             if "hierarchical_item" in col_name:
                 if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
                     value = str(row.iloc[col_idx]).strip()
-                    if value and self._is_likely_unit(value):
+                    # FIXED: Much more permissive - accept most non-empty content as potential units
+                    if (value and len(value) <= 15 and
+                            not value.replace('.', '').replace(',', '').isdigit()):
                         logger.debug(
                             f"Found unit in hierarchical column '{col_name}': '{value}'")
                         return value
+
+        # ENHANCED: If still no unit found, scan entire row for potential units
+        name_cols = [col_mapping.get(k, -1)
+                     for k in ["工事区分・工種・種別・細別", "規格", "名称・規格"]]
+        quantity_col = col_mapping.get("数量", -1)
+
+        for col_idx, cell in enumerate(row):
+            if (pd.notna(cell) and col_idx not in name_cols and col_idx != quantity_col):
+                value = str(cell).strip()
+                if (value and len(value) <= 15 and
+                    not value.replace('.', '').replace(',', '').isdigit() and
+                        value not in ["", "None", "nan", "0", " ", "　"]):
+                    logger.debug(
+                        f"Found unit '{value}' in column {col_idx} via full row scan")
+                    return value
 
         logger.debug("No unit found, returning empty string")
         return ""
@@ -1892,33 +1929,6 @@ class ExcelParser:
 
         return "merged"
 
-    def _process_single_row(self, row: pd.Series, col_mapping: Dict[str, int],
-                            sheet_name: str, sheet_idx: int, row_idx: int) -> Optional[TenderItem]:
-        """
-        Legacy method - kept for backward compatibility but now uses new spanning logic.
-        """
-        # Use new spanning logic with empty list (no previous items to merge with)
-        result = self._process_single_row_with_spanning(
-            row, col_mapping, sheet_name, sheet_idx, row_idx, [])
-
-        if isinstance(result, TenderItem):
-            return result
-        else:
-            return None
-
-    def _find_header_row(self, df: pd.DataFrame) -> Optional[int]:
-        """
-        Find the row that contains column headers (legacy method for compatibility)
-        """
-        header_idx, _ = self._find_header_row_iteratively(df, "unknown")
-        return header_idx
-
-    def _find_column_mapping(self, header_row: pd.Series) -> Dict[str, int]:
-        """
-        Map column names to indices based on patterns (legacy method for compatibility)
-        """
-        return self._get_column_mapping_from_header(header_row, "unknown")
-
     def _extract_quantity(self, cell_value) -> float:
         """
         Extract numeric quantity from cell value
@@ -1953,40 +1963,6 @@ class ExcelParser:
 
         return meaningful_cells >= 1
 
-    def _process_sheet(self, df: pd.DataFrame, sheet_name: str) -> List[TenderItem]:
-        """
-        Process a single Excel sheet (legacy method for compatibility)
-        """
-        # This method is kept for backward compatibility but now uses the new iterative approach
-        items = []
-
-        # Find header row
-        header_row_idx = self._find_header_row(df)
-        if header_row_idx is None:
-            # Try alternative approach for sheets without clear headers
-            # Look for rows with mixed text and numbers (data rows)
-            for i in range(min(20, len(df))):
-                row = df.iloc[i]
-                non_null_values = [str(val) for val in row if pd.notna(val)]
-                if len(non_null_values) >= 3:  # At least 3 columns with data
-                    # Check if it looks like a data row (text + numbers)
-                    has_text = any(not str(val).replace('.', '').replace(
-                        ',', '').isdigit() for val in non_null_values)
-                    has_numbers = any(str(val).replace('.', '').replace(
-                        ',', '').isdigit() for val in non_null_values)
-                    if has_text and has_numbers:
-                        # Use previous row as header if possible
-                        header_row_idx = max(0, i - 1)
-                        break
-
-            if header_row_idx is None:
-                print(f"No header found in sheet: {sheet_name}")
-                return items
-
-        # Get column mapping
-        header_row = df.iloc[header_row_idx]
-        col_mapping = self._find_column_mapping(header_row)
-
         # If no mapping found, try generic approach
         if not col_mapping:
             print(
@@ -2011,10 +1987,11 @@ class ExcelParser:
                     col_mapping["金額"] = col_idx
 
         if not col_mapping:
-            print(f"No recognizable columns found in sheet: {sheet_name}")
+            logger.warning(
+                f"No recognizable columns found in sheet: {sheet_name}")
             return items
 
-        print(f"Sheet '{sheet_name}': Found columns {col_mapping}")
+        logger.info(f"Sheet '{sheet_name}': Found columns {col_mapping}")
 
         # Process data rows
         for row_idx in range(header_row_idx + 1, len(df)):
@@ -2633,6 +2610,7 @@ class ExcelParser:
         """
         Map Excel subtable column names to indices based on header row.
         Enhanced to handle Excel formatting with full-width spaces, separators, and complex patterns.
+        FIXED: More flexible unit column detection to prevent empty unit extraction.
 
         Args:
             header_row: Header row data
@@ -2647,13 +2625,21 @@ class ExcelParser:
         subtable_column_patterns = {
             "名称・規格": ["名称", "規格", "名称・規格", "名\u3000称", "規\u3000格", "名称/規格", "名\u3000称/規\u3000格", "注\u3000釈"],
             "条件": ["条件", "条\u3000件"],
-            "単位": ["単位", "単\u3000位"],
-            "数量": ["数量", "数\u3000量"],
-            "単価": ["単価", "単\u3000価"],
-            "金額": ["金額", "金\u3000額"],
-            "摘要": ["摘要", "備考", "摘\u3000要", "備\u3000考"]
+            "単位": [
+                # Standard patterns
+                "単位", "単\u3000位", "単 位",
+                # Flexible patterns for unit detection
+                "単", "位", "Unit", "UNIT", "unit", "units",
+                # Common misreads or variations
+                "単価位", "単元", "単項"
+            ],
+            "数量": ["数量", "数\u3000量", "数", "量", "qty", "Qty", "QTY"],
+            "単価": ["単価", "単\u3000価", "価格", "Price"],
+            "金額": ["金額", "金\u3000額", "Amount", "Total"],
+            "摘要": ["摘要", "備考", "摘\u3000要", "備\u3000考", "Remarks", "Notes"]
         }
 
+        # First pass: Try exact matching for well-defined columns
         for col_name, patterns in subtable_column_patterns.items():
             for i, cell_value in enumerate(header_row):
                 if pd.notna(cell_value):
@@ -2668,6 +2654,32 @@ class ExcelParser:
                             break
 
                     if col_name in col_indices:
+                        break
+
+        # Second pass: Enhanced unit column detection if not found yet
+        if "単位" not in col_indices:
+            for i, cell_value in enumerate(header_row):
+                if pd.notna(cell_value) and i not in col_indices.values():
+                    cell_str = str(cell_value).strip()
+                    # More aggressive unit column detection
+                    if (len(cell_str) <= 4 and
+                        (any(char in cell_str for char in ["単", "位"]) or
+                         cell_str.lower() in ["unit", "units", "u"])):
+                        col_indices["単位"] = i
+                        logger.info(
+                            f"Mapped unit column to index {i} via enhanced detection ('{cell_str}')")
+                        break
+
+        # Third pass: If still no unit column, look for any short column that might be units
+        if "単位" not in col_indices:
+            for i, cell_value in enumerate(header_row):
+                if pd.notna(cell_value) and i not in col_indices.values():
+                    cell_str = str(cell_value).strip()
+                    # Detect very short headers that might be unit columns
+                    if len(cell_str) <= 2 and cell_str and not cell_str.isdigit():
+                        col_indices["単位"] = i
+                        logger.info(
+                            f"Mapped potential unit column to index {i} via fallback detection ('{cell_str}')")
                         break
 
         logger.info(f"Excel subtable column mapping: {col_indices}")
@@ -2903,10 +2915,20 @@ class ExcelParser:
                     if pd.notna(cell):
                         cell_str = str(cell).strip()
                         if cell_str and cell_str not in [' ', '　', '']:
-                            # Look for units
-                            if not unit and self._is_likely_unit(cell_str):
-                                unit = cell_str
-                                raw_fields["単位"] = cell_str
+                            # FIXED: Look for units - MUCH MORE PERMISSIVE
+                            if not unit:
+                                # Accept ANY non-empty cell content as a potential unit, but with basic filters
+                                # Only exclude obviously non-unit content like pure numbers or very long text
+                                if (not cell_str.replace('.', '').replace(',', '').isdigit() and  # Not a pure number
+                                    # Not too long (increased from previous limits)
+                                    len(cell_str) <= 15 and
+                                    # Not from name column
+                                    col_idx != col_mapping.get("名称・規格", -1) and
+                                        col_idx != col_mapping.get("数量", -1)):  # Not from quantity column
+                                    unit = cell_str
+                                    raw_fields["単位"] = cell_str
+                                    logger.debug(
+                                        f"Found unit '{unit}' in column {col_idx} via enhanced scan")
 
                             # Look for quantities
                             if quantity == 0.0:
@@ -3288,132 +3310,119 @@ class ExcelParser:
 
                         return ""
 
-                    # Helper function for enhanced unit detection
                     def _is_likely_unit_pattern(text):
                         """Check if text looks like a unit with more comprehensive patterns"""
-                        if not text or len(text) > 10:  # Increased length for Japanese construction units
+                        if not text or len(text) > 15:  # Increased length allowance
                             return False
 
-                        # Common Japanese/construction unit patterns
-                        unit_patterns = [
-                            # Weight/mass units
-                            "ｔ", "t", "kg", "ｋｇ", "g", "ton", "トン",
-                            # Length/area/volume units
-                            "m", "ｍ", "mm", "cm", "km", "m2", "m3", "㎡", "㎥",
-                            # Count units
-                            "個", "本", "枚", "組", "回", "式", "人", "日", "時間",
-                            # Volume units
-                            "L", "ℓ", "リットル", "cc", "ml",
-                            # Equipment/structure units
-                            "台", "基", "箇所", "ヶ所", "か所", "set", "セット",
-                            # Japanese construction-specific units
-                            "孔", "部材", "構造物", "体", "棟", "間", "スパン", "径", "巻", "束",
-                            "系", "系統", "区間", "工区", "断面", "面", "側", "面積", "延長",
-                            "幅", "厚", "深度", "高さ", "長さ", "工", "材", "品", "点",
-                            "一式", "丁", "対", "連", "段", "層", "区", "列", "班",
-                            # Per-unit expressions
-                            "m当り", "当り", "あたり", "当", "毎", "per"
-                        ]
+                        # FIXED: Much more permissive - accept most non-empty, non-numeric content
+                        if text.replace('.', '').replace(',', '').isdigit():
+                            return False  # Pure numbers are not units
 
-                        # Check exact matches
-                        if text in unit_patterns:
-                            return True
-
-                        # Check if it contains unit-like patterns
-                        for pattern in unit_patterns:
-                            if pattern in text:
-                                return True
-
-                        # Check for numeric + unit patterns (like "1m当り", "1部材当り")
-                        import re
-                        if re.match(r'^\d+[a-zA-Zｍｔｇ個本枚組回式人日時間当り孔部材構造物]+$', text):
-                            return True
-
-                        return False
+                        return len(text) <= 15  # Simple length check
 
                     name = _cell(col_map.get("name", -1))
                     qty_raw = _cell(col_map.get("qty", -1))
                     unit = _cell_with_adjacent_check("unit", col_map, row)
                     remarks_val = _cell(col_map.get("remarks", -1))
 
-                    # ENHANCED: Check adjacent columns for potential name continuations
-                    # This handles cases where continuation text is in a different column
-                    if not name and qty_raw and pending_name:
-                        # Look for name continuation in adjacent columns (up to 3 columns from name column)
+                    # ENHANCED: Row spanning logic for units
+                    # If no unit found in current row, try to inherit from previous rows or scan entire row
+                    if not unit:
+                        # Scan entire row for potential units (excluding name column)
                         name_col_idx = col_map.get("name", -1)
-                        if name_col_idx >= 0:
-                            # Check 1-3 columns to the right
-                            for adj_offset in range(1, 4):
-                                adj_col_idx = name_col_idx + adj_offset
-                                if adj_col_idx < len(row):
-                                    adj_val = row.iloc[adj_col_idx]
-                                    if pd.notna(adj_val):
-                                        adj_str = str(adj_val).strip()
-                                        if (adj_str and adj_str not in {"-", "―", "－", "—", "ｰ"} and
-                                            # Check if it looks like a name continuation (contains parentheses or descriptive text)
-                                            (("(" in adj_str) or ("（" in adj_str) or (")" in adj_str) or ("）" in adj_str) or
-                                             (len(adj_str) > 3))):
-                                            name = adj_str
-                                            break
+                        for col_idx, cell_val in enumerate(row):
+                            if (pd.notna(cell_val) and col_idx != name_col_idx):
+                                cell_str = str(cell_val).strip()
+                                if _is_likely_unit_pattern(cell_str):
+                                    unit = cell_str
+                                    break
+
+                    # ENHANCED: If still no unit and we have a pending unit from previous processing, use it
+                    if not unit and pending_unit:
+                        unit = pending_unit
 
                     qty = 0.0
-                    try:
-                        qty = self._extract_quantity(
-                            qty_raw) if qty_raw else 0.0
-                    except Exception:
-                        qty = 0.0
+                    if qty_raw:
+                        try:
+                            qty = float(qty_raw.replace(",", ""))
+                        except:
+                            pass
 
-                    # Track latest non-empty values
+                    # ENHANCED: Row spanning logic - improved unit and name handling
+                    if name and not pending_name:
+                        # New item name found
+                        if unit or qty > 0:
+                            # Complete item (has name + unit/quantity)
+                            if unit:
+                                last_unit = unit  # Remember this unit for future rows
+                            result.append(SubtableItem(
+                                item_key=name,
+                                raw_fields={"名称・規格": name, "単位": unit or "",
+                                            "数量": qty_raw or "", "摘要": remarks_val or ""},
+                                quantity=qty,
+                                unit=unit,
+                                source="Excel",
+                                reference_number=ref,
+                                sheet_name=sheet
+                            ))
+                        else:
+                            # Incomplete item (name only) - store for next row
+                            pending_name = name
+                    elif pending_name:
+                        # We have a pending name from previous row
+                        if name:
+                            # Combine names
+                            combined_name = f"{pending_name} {name}".strip()
+                        else:
+                            combined_name = pending_name
+
+                        # Use current row's unit/qty, or inherit from previous
+                        final_unit = unit or pending_unit or last_unit
+                        if final_unit:
+                            last_unit = final_unit  # Update last known unit
+
+                        result.append(SubtableItem(
+                            item_key=combined_name,
+                            raw_fields={"名称・規格": combined_name, "単位": final_unit or "",
+                                        "数量": qty_raw or "", "摘要": remarks_val or ""},
+                            quantity=qty,
+                            unit=final_unit,
+                            source="Excel",
+                            reference_number=ref,
+                            sheet_name=sheet
+                        ))
+
+                        # Clear pending state
+                        pending_name = ""
+                        pending_unit = ""
+                    elif unit and not name:
+                        # Unit without name - might be a continuation
+                        if pending_name or last_name:
+                            # Use pending or last name with this unit
+                            item_name = pending_name or last_name
+                            result.append(SubtableItem(
+                                item_key=item_name,
+                                raw_fields={
+                                    "名称・規格": item_name, "単位": unit, "数量": qty_raw or "", "摘要": remarks_val or ""},
+                                quantity=qty,
+                                unit=unit,
+                                source="Excel",
+                                reference_number=ref,
+                                sheet_name=sheet
+                            ))
+                            last_unit = unit
+                            pending_name = ""
+                            pending_unit = ""
+                        else:
+                            # Store unit for potential future use
+                            pending_unit = unit
+
+                    # Update tracking variables
                     if name:
                         last_name = name
                     if unit:
                         last_unit = unit
-
-                    # --- Enhanced row-spanning merge logic ---
-                    # Case 1: Row with name but NO quantity data → defer for spanning
-                    if name and qty_raw == "":
-                        pending_name = name
-                        pending_unit = unit or pending_unit
-                        continue
-
-                    # Case 2: Row with quantity and we have pending name → combine
-                    elif qty_raw and pending_name:
-                        if name:
-                            # Concatenate names: pending + current
-                            final_name = f"{pending_name} {name}"
-                        else:
-                            # Use pending name only
-                            final_name = pending_name
-                        final_unit = pending_unit or unit or last_unit
-                        pending_name = ""
-                        pending_unit = ""
-
-                    # Case 3: Complete row or standalone item
-                    else:
-                        final_name = name or last_name
-                        final_unit = unit or last_unit
-
-                    if final_name:
-                        raw = {"名称・規格など": final_name, "名称・規格": final_name}
-                        if qty_raw:
-                            raw["数量"] = qty_raw
-                        if final_unit:
-                            raw["単位"] = final_unit
-                        if remarks_val:
-                            raw["備考"] = remarks_val
-
-                        summary.append(
-                            SubtableItem(
-                                item_key=final_name,
-                                raw_fields=raw,
-                                quantity=qty,
-                                unit=final_unit,
-                                source="Excel",
-                                page_number=None,
-                                reference_number=ref,
-                                sheet_name=sheet,
-                            )
-                        )
 
                 else:
                     # reached end of sheet without hitting 3 consecutive blanks

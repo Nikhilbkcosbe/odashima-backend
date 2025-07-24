@@ -282,7 +282,7 @@ class ExcelTableExtractorCorrected:
                 row3_data.append(self.get_cell_value(start_row + 2, col))
 
             # Add debug output to understand the physical row structure
-            # print(f"\nDEBUG: Splitting logical row {start_row}-{end_row}")
+    
             # print(f"Row {start_row} (first item): {row1_data}")
             # print(f"Row {start_row + 1} (middle data): {row2_data}")
             # print(f"Row {start_row + 2} (second item): {row3_data}")
