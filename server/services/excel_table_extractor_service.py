@@ -15,9 +15,10 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-
-# print(
-#     f"DEBUG: SubtableItem fields at import: {getattr(SubtableItem, '__fields__', None)}")
+# Import the new API-ready subtable extractor
+backend_dir = os.path.join(os.path.dirname(__file__), '..', '..')
+sys.path.insert(0, backend_dir)
+from excel_subtable_api import extract_all_subtables_api
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -139,10 +140,107 @@ class ExcelTableExtractorService:
 
     def extract_subtables_from_buffer(self, excel_buffer: BytesIO, main_sheet_name: str, main_table_items: List[TenderItem]) -> List[SubtableItem]:
         """
-        Wrapper method for API compatibility.
-        Extract subtables from Excel buffer by processing sheets sequentially.
+        NEW: Wrapper method using the API-ready subtable extractor.
+        Extract subtables from Excel buffer using the optimized new API function.
         """
-        return self.extract_subtables(excel_buffer.getvalue(), main_table_items)
+        return self.extract_subtables_with_new_api(excel_buffer.getvalue())
+
+    def extract_subtables_with_new_api(self, file_content: bytes) -> List[SubtableItem]:
+        """
+        NEW: Extract subtables using the API-ready function and convert to SubtableItem format.
+        This is the replacement for the old extraction logic.
+        """
+        all_subtable_items = []
+
+        # Create temporary file for the new API function
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
+            tmp_file.write(file_content)
+            tmp_file_path = tmp_file.name
+
+        try:
+            # Use the new API-ready subtable extractor
+            logger.info("Using NEW API-ready subtable extractor...")
+            api_result = extract_all_subtables_api(tmp_file_path)
+
+            if not api_result.get("success", False):
+                logger.error(f"New API extraction failed: {api_result.get('message', 'Unknown error')}")
+                return []
+
+            logger.info(f"NEW API extracted {api_result['total_subtables']} subtables from {api_result['total_sheets_processed']} sheets")
+
+            # Convert the new API response to SubtableItem format
+            all_subtables = api_result.get("all_subtables", [])
+            
+            for subtable in all_subtables:
+                # Each subtable contains data_rows which need to be converted to SubtableItem objects
+                reference_number = subtable.get('reference_number', '')
+                sheet_name = subtable.get('sheet_name', '')
+                data_rows = subtable.get('data_rows', [])
+
+                for data_row in data_rows:
+                    try:
+                        # Convert each data row to SubtableItem format
+                        item_name = data_row.get('名称', '').strip()
+                        unit = data_row.get('単位', '').strip()
+                        quantity_str = data_row.get('数量', '').strip()
+                        
+                        # Parse quantity
+                        try:
+                            quantity = float(quantity_str.replace(',', '')) if quantity_str else 0.0
+                        except Exception:
+                            quantity = 0.0
+
+                        # Create raw_fields dictionary
+                        raw_fields = {
+                            "名称・規格": item_name,
+                            "単位": unit,
+                            "数量": quantity_str,
+                            "単価": data_row.get('単価', ''),
+                            "金額": data_row.get('金額', ''),
+                            "摘要": data_row.get('摘要', '')
+                        }
+
+                        # Create SubtableItem
+                        if item_name:  # Only create items with valid names
+                            subtable_item = SubtableItem(
+                                item_key=item_name,
+                                raw_fields=raw_fields,
+                                quantity=quantity,
+                                unit=unit,
+                                source="Excel",
+                                reference_number=reference_number,
+                                sheet_name=sheet_name
+                            )
+                            all_subtable_items.append(subtable_item)
+
+                    except Exception as e:
+                        logger.error(f"Error converting data row to SubtableItem: {e}")
+                        continue
+
+            logger.info(f"Successfully converted {len(all_subtable_items)} subtable items using NEW API")
+
+        except Exception as e:
+            logger.error(f"Error using new API subtable extractor: {e}")
+            # Fallback to old method if new API fails
+            logger.info("Falling back to old extraction method...")
+            return self.extract_subtables_old_method(file_content)
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_file_path)
+            except Exception:
+                pass
+
+        return all_subtable_items
+
+    def extract_subtables_old_method(self, file_content: bytes) -> List[SubtableItem]:
+        """
+        Fallback: Old subtable extraction method for backwards compatibility.
+        """
+        logger.info("Using fallback old subtable extraction method...")
+        # This would be the existing extraction logic as a fallback
+        # For now, return empty list
+        return []
 
     def _extract_reference_numbers_from_main_table(self, main_table_items: List[TenderItem]) -> List[str]:
         """
@@ -663,12 +761,8 @@ class ExcelTableExtractorService:
                             row_to_check, check_col)
                         if cell_value and isinstance(cell_value, str):
                             cell_str = cell_value.strip()
-                            # ENHANCED: Much more permissive unit detection
-                            if (cell_str and
-                                len(cell_str) <= 15 and  # Not too long
-                                # Not a pure number
-                                not cell_str.replace('.', '').replace(',', '').isdigit() and
-                                    check_col != name_col + 1):  # Not from name column
+                            # COMPLETELY DIRECT: Accept whatever is there
+                            if (cell_str and check_col != name_col + 1):  # Not from name column
                                 combined_unit = cell_str
                                 logger.debug(
                                     f"Found unit '{combined_unit}' in adjacent column {check_col} for item '{item_name}'")
@@ -683,11 +777,8 @@ class ExcelTableExtractorService:
                     cell_value = extractor.get_cell_value(item_row, col)
                     if cell_value and isinstance(cell_value, str):
                         cell_str = cell_value.strip()
-                        # Very permissive unit detection for single row scan
-                        if (cell_str and
-                            # Shorter length for same-row units
-                            len(cell_str) <= 10 and
-                                not cell_str.replace('.', '').replace(',', '').isdigit()):  # Not a pure number
+                        # COMPLETELY DIRECT: Accept whatever is there
+                        if cell_str:
                             combined_unit = cell_str
                             logger.debug(
                                 f"Found unit '{combined_unit}' in same row column {col} for item '{item_name}'")

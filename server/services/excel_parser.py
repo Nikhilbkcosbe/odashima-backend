@@ -991,11 +991,10 @@ class ExcelParser:
 
     def _extract_unit_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
         """
-        SIMPLIFIED: Extract unit focusing on the main unit column and hierarchical columns.
-        FIXED: More permissive unit extraction to capture all actual units.
-        Looks for: 単位 and variations with spaces
+        SMART: Extract unit focusing on the main unit column and hierarchical columns.
+        Validates even mapped unit columns to prevent specifications from being treated as units.
         """
-        # Priority 1: Main unit columns
+        # Priority 1: Main unit columns - validate even these now
         unit_columns = [
             "単位",        # Standard without space
             "単　位",      # With full-width space
@@ -1009,39 +1008,100 @@ class ExcelParser:
                 col_idx = col_mapping[col_name]
                 if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
                     value = str(row.iloc[col_idx]).strip()
-                    if (value and value not in ["", "None", "nan", "0"] and
-                            not all(c in " 　\t\n\r" for c in value)):
-                        return value
+                    if value and value not in ["", "None", "nan", "0"]:
+                        # ENHANCED: Validate even mapped unit columns to prevent specifications
+                        if self._is_valid_unit_content(value):
+                            return value
+                        else:
+                            logger.debug(
+                                f"Rejecting invalid unit from column '{col_name}': '{value}'")
 
         # Priority 2: Check hierarchical columns where units might be stored
         for col_name, col_idx in col_mapping.items():
             if "hierarchical_item" in col_name:
                 if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
                     value = str(row.iloc[col_idx]).strip()
-                    # FIXED: Much more permissive - accept most non-empty content as potential units
-                    if (value and value not in ["", "None", "nan", "0"] and
-                        not all(c in " 　\t\n\r" for c in value) and
-                        len(value) <= 15 and  # Not too long
-                            not value.replace('.', '').replace(',', '').isdigit()):  # Not a pure number
+                    if value and self._is_likely_construction_unit(value):
                         return value
 
-        # Priority 3: ENHANCED - If still no unit found, scan entire row for potential units
+        # Priority 3: If still no unit found, scan entire row for construction units
         name_col_idx = col_mapping.get(
             "工事区分・工種・種別・細別", col_mapping.get("規格", -1))
         quantity_col_idx = col_mapping.get("数量", -1)
+        price_col_idx = col_mapping.get("単価", -1)
 
         for col_idx, cell in enumerate(row):
-            if pd.notna(cell) and col_idx not in [name_col_idx, quantity_col_idx]:
+            if pd.notna(cell) and col_idx not in [name_col_idx, quantity_col_idx, price_col_idx]:
                 value = str(cell).strip()
-                if (value and value not in ["", "None", "nan", "0"] and
-                    not all(c in " 　\t\n\r" for c in value) and
-                    len(value) <= 15 and  # Not too long
-                        not value.replace('.', '').replace(',', '').isdigit()):  # Not a pure number
-                    logger.debug(
-                        f"Found unit '{value}' in column {col_idx} via full row scan")
+                if value and self._is_likely_construction_unit(value):
                     return value
 
         return ""
+
+    def _is_valid_unit_content(self, text: str) -> bool:
+        """
+        Enhanced validation for content that claims to be in a unit column.
+        More strict than _is_likely_construction_unit to prevent specifications.
+        """
+        if not text or len(text.strip()) == 0:
+            return False
+
+        text = text.strip()
+
+        # Reject very long specifications (likely item descriptions)
+        if len(text) > 15:  # More strict than _is_likely_construction_unit
+            return False
+
+        # Reject anything with model numbers, specifications
+        spec_indicators = ["VP", "VU", "*", "×", "x",
+                           "φ", "Φ", "ｽﾘｰﾌﾞ", "直管", "エルボ", "チーズ", "PVC管"]
+        if any(indicator in text for indicator in spec_indicators):
+            return False
+
+        # Reject company names
+        company_indicators = [
+            "株式会社", "(株)", "LLC", "有限会社", "(有)", "合同会社", "Co", "Ltd"]
+        if any(indicator in text for indicator in company_indicators):
+            return False
+
+        # Reject large numbers (prices)
+        if text.isdigit() and len(text) > 4:
+            return False
+
+        # Reject decimal prices
+        if "." in text:
+            try:
+                float_val = float(text)
+                if float_val > 100:  # Most units are small numbers or text
+                    return False
+            except ValueError:
+                pass
+
+        # Accept only known valid construction units
+        valid_units = [
+            # Basic units
+            "本", "個", "枚", "組", "式", "回", "人", "日", "時間", "箇所", "台", "基", "棟", "戸",
+            # Measurement units
+            "m", "m2", "m3", "cm", "mm", "km", "ｍ", "㎡", "㎥", "m²", "m³",
+            # Weight units
+            "t", "kg", "ｔ", "ｋｇ", "g", "トン", "ton",
+            # Volume units
+            "L", "ℓ", "リットル", "l",
+            # Construction specific
+            "面", "層", "工区", "孔", "断面", "系", "当り", "あたり", "当",
+            # Common combinations
+            "m3", "m2", "部材当り", "1部材当り", "1m3当り", "1時間当り"
+        ]
+
+        # Direct match with known units
+        if text in valid_units:
+            return True
+
+        # Allow very short text that might be abbreviated units (but not pure numbers)
+        if len(text) <= 3 and not text.isdigit():
+            return True
+
+        return False
 
     def _extract_remarks_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
         """
@@ -1766,56 +1826,130 @@ class ExcelParser:
 
     def _extract_unit(self, row: pd.Series, col_mapping: Dict[str, int]) -> str:
         """
-        Extract unit from unit column - handles Japanese Excel patterns where unit might be in different cells
-        FIXED: More permissive unit extraction to capture all actual units.
+        SMART: Extract unit from unit column with enhanced validation.
+        Validates even mapped unit columns to prevent specifications from being treated as units.
         """
         unit_columns = ["単位", "Unit", "units"]
 
         logger.debug(
             f"Extracting unit from row. Col mapping keys: {list(col_mapping.keys())}")
 
-        # First try the mapped unit column
+        # First try the mapped unit column - validate even these now
         for col_name in unit_columns:
             if col_name in col_mapping:
                 col_idx = col_mapping[col_name]
                 if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
                     value = str(row.iloc[col_idx]).strip()
-                    # Include spaces
-                    if value and value not in ["", "None", "nan", "0", " ", "　"]:
-                        logger.debug(
-                            f"Found unit in column '{col_name}': '{value}'")
-                        return value
+                    if value and value not in ["", "None", "nan", "0"]:
+                        # ENHANCED: Validate even mapped unit columns to prevent specifications
+                        if self._is_valid_unit_content(value):
+                            logger.debug(
+                                f"Found unit in column '{col_name}': '{value}'")
+                            return value
+                        else:
+                            logger.debug(
+                                f"Rejecting invalid unit from column '{col_name}': '{value}'")
 
-        # Japanese Excel pattern: unit might be in hierarchical columns (especially column 3)
-        # Look in hierarchical columns for units like "式", "m3", etc.
+        # Japanese Excel pattern: unit might be in hierarchical columns
         for col_name, col_idx in col_mapping.items():
             if "hierarchical_item" in col_name:
                 if col_idx < len(row) and not pd.isna(row.iloc[col_idx]):
                     value = str(row.iloc[col_idx]).strip()
-                    # FIXED: Much more permissive - accept most non-empty content as potential units
-                    if (value and len(value) <= 15 and
-                            not value.replace('.', '').replace(',', '').isdigit()):
+                    if value and self._is_likely_construction_unit(value):
                         logger.debug(
                             f"Found unit in hierarchical column '{col_name}': '{value}'")
                         return value
 
-        # ENHANCED: If still no unit found, scan entire row for potential units
+        # If still no unit found, scan entire row for construction units
         name_cols = [col_mapping.get(k, -1)
                      for k in ["工事区分・工種・種別・細別", "規格", "名称・規格"]]
         quantity_col = col_mapping.get("数量", -1)
+        price_col = col_mapping.get("単価", -1)
 
         for col_idx, cell in enumerate(row):
-            if (pd.notna(cell) and col_idx not in name_cols and col_idx != quantity_col):
+            if (pd.notna(cell) and col_idx not in name_cols and
+                    col_idx != quantity_col and col_idx != price_col):
                 value = str(cell).strip()
-                if (value and len(value) <= 15 and
-                    not value.replace('.', '').replace(',', '').isdigit() and
-                        value not in ["", "None", "nan", "0", " ", "　"]):
+                if value and self._is_likely_construction_unit(value):
                     logger.debug(
                         f"Found unit '{value}' in column {col_idx} via full row scan")
                     return value
 
         logger.debug("No unit found, returning empty string")
         return ""
+
+    def _is_likely_construction_unit(self, text: str) -> bool:
+        """
+        Check if text looks like a construction unit (for hierarchical columns and row scanning).
+        Less strict than _is_valid_unit_content for exploratory scanning.
+        """
+        if not text or len(text.strip()) == 0:
+            return False
+
+        text = text.strip()
+
+        # Reject obvious specifications
+        spec_indicators = ["VP", "VU", "*", "×", "x",
+                           "φ", "Φ", "ｽﾘｰﾌﾞ", "直管", "エルボ", "チーズ", "PVC管"]
+        if any(indicator in text for indicator in spec_indicators):
+            return False
+
+        # Filter out obvious non-units
+        # 1. Large numbers (prices) - more than 4 digits
+        if text.isdigit() and len(text) > 4:
+            return False
+
+        # 2. Company names (contains 株式会社, (株), LLC, etc.)
+        company_indicators = ["株式会社", "(株)", "LLC", "有限会社", "(有)", "合同会社"]
+        if any(indicator in text for indicator in company_indicators):
+            return False
+
+        # 3. Very long text (descriptions, not units) - more than 15 characters
+        if len(text) > 15:
+            return False
+
+        # 4. Obvious prices (contains decimal points with lots of digits)
+        if "." in text:
+            try:
+                float_val = float(text)
+                if float_val > 1000:  # Prices are usually large numbers
+                    return False
+            except ValueError:
+                pass
+
+        # Accept common construction units
+        common_units = [
+            # Japanese construction units
+            "本", "個", "枚", "組", "式", "回", "人", "日", "時間", "箇所",
+            "m", "m2", "m3", "cm", "mm", "km", "ｍ", "㎡", "㎥",
+            "t", "kg", "ｔ", "ｋｇ", "g", "トン",
+            "L", "ℓ", "リットル",
+            "台", "基", "棟", "戸", "面", "層", "工区",
+            "孔", "部材", "構造物", "断面", "系",
+            # Units with modifiers
+            "m3", "m2", "当り", "あたり", "当", "部材当り", "1部材当り"
+        ]
+
+        # Check if it's a known unit
+        if text in common_units:
+            return True
+
+        # Check if it contains common unit patterns
+        unit_patterns = ["m", "kg", "本", "個", "枚", "組", "式", "t", "当り", "あたり"]
+        if any(pattern in text for pattern in unit_patterns):
+            return True
+
+        # For short text (≤ 6 chars), be more permissive but still filter numbers and specs
+        if len(text) <= 6:
+            # Don't accept pure numbers or dates
+            if text.isdigit():
+                return False
+            # Don't accept obvious prices or spec patterns
+            if "/" in text or "-" in text and len(text.split("-")) == 3:
+                return False
+            return True
+
+        return False
 
     def _extract_quantity_simple(self, row: pd.Series, col_mapping: Dict[str, int]) -> float:
         """
@@ -2873,9 +3007,8 @@ class ExcelParser:
                 for cell in row:
                     if pd.notna(cell):
                         cell_str = str(cell).strip()
-                        if (cell_str and cell_str not in [' ', '　', ''] and
-                            (len(cell_str) > 2 or self._is_likely_unit(cell_str) or
-                             self._extract_quantity(cell_str) > 0)):
+                        # COMPLETELY DIRECT - accept any non-empty cell as meaningful data
+                        if cell_str and cell_str not in [' ', '　', '']:
                             has_meaningful_data = True
                             break
 
@@ -2914,17 +3047,13 @@ class ExcelParser:
                 for col_idx, cell in enumerate(row):
                     if pd.notna(cell):
                         cell_str = str(cell).strip()
-                        if cell_str and cell_str not in [' ', '　', '']:
-                            # FIXED: Look for units - MUCH MORE PERMISSIVE
+                        if cell_str:
+                            # COMPLETELY DIRECT: Look for units - NO filtering, just extract whatever is there
                             if not unit:
-                                # Accept ANY non-empty cell content as a potential unit, but with basic filters
-                                # Only exclude obviously non-unit content like pure numbers or very long text
-                                if (not cell_str.replace('.', '').replace(',', '').isdigit() and  # Not a pure number
-                                    # Not too long (increased from previous limits)
-                                    len(cell_str) <= 15 and
-                                    # Not from name column
-                                    col_idx != col_mapping.get("名称・規格", -1) and
-                                        col_idx != col_mapping.get("数量", -1)):  # Not from quantity column
+                                # Accept ANY non-empty cell content as a potential unit
+                                # Skip only the name and quantity columns to avoid confusion
+                                if (col_idx != col_mapping.get("名称・規格", -1) and
+                                        col_idx != col_mapping.get("数量", -1)):
                                     unit = cell_str
                                     raw_fields["単位"] = cell_str
                                     logger.debug(
@@ -3311,15 +3440,11 @@ class ExcelParser:
                         return ""
 
                     def _is_likely_unit_pattern(text):
-                        """Check if text looks like a unit with more comprehensive patterns"""
-                        if not text or len(text) > 15:  # Increased length allowance
+                        """Check if text looks like a unit - COMPLETELY DIRECT, no filtering"""
+                        if not text:
                             return False
-
-                        # FIXED: Much more permissive - accept most non-empty, non-numeric content
-                        if text.replace('.', '').replace(',', '').isdigit():
-                            return False  # Pure numbers are not units
-
-                        return len(text) <= 15  # Simple length check
+                        # COMPLETELY DIRECT - accept anything non-empty
+                        return len(text.strip()) > 0
 
                     name = _cell(col_map.get("name", -1))
                     qty_raw = _cell(col_map.get("qty", -1))

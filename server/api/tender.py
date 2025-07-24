@@ -27,6 +27,102 @@ async def test_endpoint():
     return {"status": "ok", "message": "Tender API is working"}
 
 
+@router.post("/test-new-extraction")
+async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
+    """
+    NEW: Test endpoint to verify the new API-ready subtable extraction is working
+    """
+    logger.info("=== TESTING NEW API-READY SUBTABLE EXTRACTION ===")
+    logger.info(f"Excel file: {excel_file.filename}")
+
+    # Validate file type
+    if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=400, detail="Excel file required")
+
+    try:
+        # Handle Excel file (in-memory processing)
+        excel_content = await excel_file.read()
+        logger.info(f"Excel file size: {len(excel_content)} bytes")
+
+        # Create in-memory buffer for Excel
+        excel_buffer = BytesIO(excel_content)
+
+        # Initialize the Excel table extractor service
+        excel_table_extractor = ExcelTableExtractorService()
+
+        # Test the new API-ready subtable extraction
+        logger.info("Testing new API-ready subtable extraction...")
+        excel_subtables = excel_table_extractor.extract_subtables_with_new_api(excel_content)
+        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtable items")
+
+        # Close Excel buffer
+        excel_buffer.close()
+
+        # TEST: Unit normalization fix
+        logger.info("=== TESTING UNIT NORMALIZATION FIX ===")
+        from ..services.matcher import Matcher
+        matcher = Matcher()
+        
+        # Test cases for the reported unit mismatch issue
+        test_cases = [
+            ("m", "ｍ"),      # half-width vs full-width m
+            ("t", "ｔ"),      # half-width vs full-width t  
+            ("kg", "ｋｇ"),   # half-width vs full-width kg
+            ("m", "m"),      # identical units
+            ("t", "t"),      # identical units
+        ]
+        
+        unit_test_results = []
+        for pdf_unit, excel_unit in test_cases:
+            pdf_normalized = matcher._normalize_unit(pdf_unit)
+            excel_normalized = matcher._normalize_unit(excel_unit)
+            match = pdf_normalized == excel_normalized
+            
+            test_result = {
+                "pdf_unit": pdf_unit,
+                "excel_unit": excel_unit,
+                "pdf_normalized": pdf_normalized,
+                "excel_normalized": excel_normalized,
+                "units_match": match,
+                "issue_type": "FIXED" if match else "STILL_MISMATCH"
+            }
+            unit_test_results.append(test_result)
+            logger.info(f"Unit test: '{pdf_unit}' vs '{excel_unit}' -> {pdf_normalized} vs {excel_normalized} = {'MATCH' if match else 'MISMATCH'}")
+
+        # Create summary response
+        summary = {
+            "success": True,
+            "message": f"Successfully tested new extraction with {len(excel_subtables)} subtable items",
+            "excel_file": excel_file.filename,
+            "total_subtable_items": len(excel_subtables),
+            "extraction_method": "NEW API-ready extraction",
+            "unit_normalization_tests": unit_test_results,
+            "sample_items": []
+        }
+
+        # Add sample items (first 3) to the response for verification
+        for i, item in enumerate(excel_subtables[:3]):
+            sample_item = {
+                "item_key": item.item_key,
+                "reference_number": item.reference_number,
+                "sheet_name": item.sheet_name,
+                "quantity": item.quantity,
+                "unit": item.unit,
+                "raw_fields": item.raw_fields
+            }
+            summary["sample_items"].append(sample_item)
+
+        logger.info("=== NEW EXTRACTION TEST COMPLETED ===")
+        return summary
+
+    except Exception as e:
+        logger.error(f"Error during new extraction test: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Test extraction error: {str(e)}")
+
+    finally:
+        gc.collect()
+
+
 @router.post("/extract-and-cache")
 async def extract_and_cache_files(
     pdf_file: UploadFile = File(...),
@@ -138,11 +234,11 @@ async def extract_and_cache_files(
         )
         logger.info(f"Extracted {len(pdf_subtables)} PDF subtable items")
 
-        logger.info("Extracting subtables from Excel...")
+        logger.info("Extracting subtables from Excel using NEW API-ready extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or '', excel_items
         )
-        logger.info(f"Extracted {len(excel_subtables)} Excel subtable items")
+        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtable items")
 
         # Close Excel buffer
         excel_buffer.close()
@@ -1017,8 +1113,10 @@ async def compare_tender_files_missing_only(
             pdf_subtable_start_page,
             pdf_subtable_end_page
         )
+        logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
+        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         excel_buffer.close()
 
@@ -1187,8 +1285,10 @@ async def compare_tender_files_mismatches_only(
             pdf_subtable_start_page,
             pdf_subtable_end_page
         )
+        logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
+        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         excel_buffer.close()
 
@@ -1558,8 +1658,10 @@ async def compare_tender_files_extra_items_only(
             pdf_subtable_start_page,
             pdf_subtable_end_page
         )
+        logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
+        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         excel_buffer.close()
 
@@ -1784,12 +1886,12 @@ async def compare_subtables(
             pdf_path, pdf_subtable_start_page, pdf_subtable_end_page, valid_references)
         logger.info(f"Total PDF subtables extracted: {len(pdf_subtables)}")
 
-        # Extract subtables from Excel using the new boundary-based logic
+        # Extract subtables from Excel using the NEW API-ready logic
         logger.info(
-            "Extracting subtables from Excel using boundary-based logic...")
+            "Extracting subtables from Excel using NEW API-ready logic...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, main_sheet_name, main_table_items)
-        logger.info(f"Total Excel subtables extracted: {len(excel_subtables)}")
+        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         # Close Excel buffer
         excel_buffer.close()

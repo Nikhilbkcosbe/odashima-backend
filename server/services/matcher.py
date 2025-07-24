@@ -92,8 +92,9 @@ class Matcher:
                 quantity_diff = (excel_item.quantity or 0) - \
                     (pdf_item.quantity or 0)
                 has_quantity_mismatch = abs(quantity_diff) >= 0.001
-                pdf_unit = (pdf_item.unit or '').strip()
-                excel_unit = (excel_item.unit or '').strip()
+                # FIXED: Use normalized unit comparison to handle full-width vs half-width characters
+                pdf_unit = self._normalize_unit(pdf_item.unit)
+                excel_unit = self._normalize_unit(excel_item.unit)
                 has_unit_mismatch = pdf_unit != excel_unit
                 if has_quantity_mismatch:
                     status = "QUANTITY_MISMATCH"
@@ -248,18 +249,35 @@ class Matcher:
     def _normalize_unit(self, unit: str) -> str:
         """
         Normalize unit values for comparison.
-        Handles None values and common unit variations.
+        Handles None values, common unit variations, and FULL-WIDTH vs HALF-WIDTH characters.
         """
         if not unit:
             return ""
 
-        # Strip whitespace and convert to lowercase
-        normalized = str(unit).strip().lower()
+        # Strip whitespace
+        normalized = str(unit).strip()
+        
+        # CRITICAL FIX: Convert full-width characters to half-width BEFORE other processing
+        # This handles cases like "ｍ" (full-width) vs "m" (half-width)
+        full_to_half_map = str.maketrans(
+            'ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ'
+            'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ'
+            '０１２３４５６７８９'
+            '！＂＃＄％＆＇（）＊＋，－．／：；＜＝＞？＠［＼］＾＿｀｛｜｝～',
+            'abcdefghijklmnopqrstuvwxyz'
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            '0123456789'
+            '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+        )
+        normalized = normalized.translate(full_to_half_map)
+        
+        # Convert to lowercase after width normalization
+        normalized = normalized.lower()
 
         # Handle common variations
         unit_mappings = {
             "m2": "㎡",
-            "m3": "㎥",
+            "m3": "㎥", 
             "m²": "㎡",
             "m³": "㎥",
             "平方メートル": "㎡",
@@ -270,10 +288,20 @@ class Matcher:
             "キログラム": "kg",
             "グラム": "g",
             "リットル": "l",
-            "ℓ": "l"
+            "ℓ": "l",
+            # Additional mappings for full-width units that might remain
+            "ｍ": "m",  # Full-width m -> half-width m
+            "ｔ": "t",  # Full-width t -> half-width t
+            "ｋｇ": "kg", # Full-width kg -> half-width kg
         }
 
-        return unit_mappings.get(normalized, normalized)
+        result = unit_mappings.get(normalized, normalized)
+        
+        # Debug logging for unit mismatches
+        if unit != result:
+            logger.debug(f"Unit normalized: '{unit}' -> '{result}'")
+            
+        return result
 
     def _create_comparison_result(self, pdf_item: TenderItem, excel_item: TenderItem,
                                   confidence: float, match_type: str) -> ComparisonResult:
@@ -534,9 +562,9 @@ class Matcher:
                 logger.debug(f"Quantities don't match: PDF={pdf_item.quantity} vs Excel={excel_item.quantity}")
                 return False
             
-            # Compare units (normalize and compare)
-            pdf_unit = self.normalizer.normalize_item(pdf_item.unit or "")
-            excel_unit = self.normalizer.normalize_item(excel_item.unit or "")
+            # Compare units (normalize and compare) - FIXED to use unit-specific normalization
+            pdf_unit = self._normalize_unit(pdf_item.unit)
+            excel_unit = self._normalize_unit(excel_item.unit)
             unit_match = pdf_unit == excel_unit
             
             if not unit_match:
