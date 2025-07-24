@@ -5,13 +5,9 @@ Extracts all subtables from all remaining sheets (except main sheet) of an Excel
 
 import pandas as pd
 import logging
-import sys
-import os
 from typing import List, Dict, Any, Optional
 
-# Add parent directory to path to import excel_subtable_extractor
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, parent_dir)
+# Import the local excel_subtable_extractor (now in backend directory)
 from excel_subtable_extractor import extract_subtables_from_excel
 
 # Set up logging
