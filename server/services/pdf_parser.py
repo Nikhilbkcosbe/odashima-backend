@@ -470,11 +470,28 @@ class PDFParser:
         return len(table)
 
     def _is_subtable_end_row(self, row: List) -> bool:
-        """Checks if a row indicates the end of a subtable."""
+        """
+        Checks if a row indicates the end of a subtable.
+        UPDATED: When encountering '計' (total), treat as subtable end and ignore remaining rows.
+        """
         if not row:
             return True
-        cell_text = "".join(str(c) for c in row if c)
-        return any(word in cell_text for word in ["合計", "小計", "総計", "計"])
+
+        # Check each cell in the row
+        for cell in row:
+            if cell:
+                cell_str = str(cell).strip()
+
+                # UPDATED: Treat "計" as definitive subtable end marker
+                # When we encounter "計", this marks the end of the current subtable
+                if cell_str == "計":
+                    return True
+
+                # Also check for other definitive end patterns
+                if any(word in cell_str for word in ["合計", "小計", "総計"]):
+                    return True
+
+        return False
 
     def _process_subtable_data_rows_with_spanning(self, data_rows: List[List], col_mapping: Dict[str, int],
                                                   page_num: int, reference_number: Optional[str],

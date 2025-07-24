@@ -2765,7 +2765,7 @@ class ExcelParser:
     def _is_excel_subtable_end_row(self, row: pd.Series) -> bool:
         """
         Check if an Excel row indicates the end of a subtable.
-        ENHANCED: More conservative detection to avoid stopping too early.
+        UPDATED: When encountering '計' (total), treat as subtable end and ignore remaining rows.
 
         Args:
             row: Excel row data
@@ -2776,13 +2776,22 @@ class ExcelParser:
         if row is None or len(row) == 0:
             return True
 
-        # Check for typical end indicators - be more conservative
+        # Check if row is completely empty (using comprehensive empty detection)
+        if self._is_completely_empty_row(row):
+            return True
+
+        # Check for typical end indicators
         for cell_value in row:
             if pd.notna(cell_value):
                 cell_str = str(cell_value).strip()
 
-                # Only treat as end if it's a clear overall total, not just a single subtable total
-                # "計" alone is often just a subtotal, not the end of all subtables
+                # UPDATED: Treat "計" as definitive subtable end marker
+                # When we encounter "計", this marks the end of the current subtable
+                # and we should ignore all remaining rows in this subtable
+                if cell_str == "計":
+                    return True
+
+                # Also check for other definitive end patterns
                 definitive_end_patterns = ["合計", "総計", "全計", "最終計"]
 
                 # Check for definitive end patterns
@@ -2790,12 +2799,9 @@ class ExcelParser:
                     if pattern in cell_str and len(cell_str) <= 15:
                         return True
 
-                # For "計" and "小計", be more restrictive - only end if it's clearly a final total
+                # For "小計" and compound "計" patterns, be more restrictive - only end if it's clearly a final total
                 # Look for patterns like "工事費計", "総工事費計", etc.
-                if ("計" in cell_str or "小計" in cell_str) and len(cell_str) <= 10:
-                    # If it's just "計" by itself, it's likely a subtable total - continue scanning
-                    if cell_str == "計":
-                        continue
+                if ("小計" in cell_str or ("計" in cell_str and len(cell_str) > 1)) and len(cell_str) <= 10:
                     # If it contains other text with "計", it might be a section total
                     if any(word in cell_str for word in ["工事", "費", "額", "総", "全"]):
                         return True

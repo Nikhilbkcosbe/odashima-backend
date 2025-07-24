@@ -385,7 +385,7 @@ class ExcelTableExtractorService:
     def _is_table_title(self, item_name: str) -> bool:
         """
         Check if an item name is a table title that should be skipped.
-        Only filter obvious structural elements, not valid items.
+        UPDATED: Now treats "計" as subtable end marker instead of skipping.
         """
         if not item_name or not item_name.strip():
             return False
@@ -393,9 +393,10 @@ class ExcelTableExtractorService:
         item_name = item_name.strip()
 
         # Filter obvious structural elements
+        # NOTE: "計" is now handled as subtable end marker in _is_excel_subtable_end_row()
+        # so it's removed from this list to avoid double processing
         structural_elements = [
             "＊＊＊合計＊＊＊",
-            "計",
             "諸雑費",
             "諸雑費(率+まるめ)",
             "諸雑費(まるめ)",
@@ -422,8 +423,21 @@ class ExcelTableExtractorService:
 
     def _is_table_end(self, extractor, row: int) -> bool:
         """
-        Check if we've reached the end of a table by looking for solid lines or empty rows.
+        Check if we've reached the end of a table by looking for solid lines, empty rows, or "計" markers.
+        UPDATED: Now checks for "計" (total) as subtable end marker.
         """
+        # UPDATED: Check if this row contains "計" (total) marker
+        for col in range(1, min(extractor.worksheet.max_column + 1, 10)):
+            cell_value = extractor.get_cell_value(row, col)
+            if cell_value and isinstance(cell_value, str):
+                cell_str = cell_value.strip()
+                # UPDATED: Treat "計" as definitive subtable end marker
+                if cell_str == "計":
+                    return True
+                # Also check for other definitive end patterns  
+                if any(pattern in cell_str for pattern in ["合計", "総計", "全計", "最終計"]):
+                    return True
+
         # Don't stop on single empty rows - check multiple consecutive empty rows
         empty_row_count = 0
         for check_row in range(row, min(row + 3, extractor.worksheet.max_row + 1)):
@@ -743,9 +757,10 @@ class ExcelTableExtractorService:
 
     def _is_definitive_table_end(self, extractor, row: int) -> bool:
         """
-        Check for definitive table end - only stop on clear boundaries like next reference number.
+        Check for definitive table end - only stop on clear boundaries like next reference number or "計" marker.
+        UPDATED: Now checks for "計" (total) as subtable end marker.
         """
-        # Check if we've reached the next reference number
+        # Check if we've reached the next reference number or "計" marker
         for col in range(1, min(extractor.worksheet.max_column + 1, 5)):
             cell_value = extractor.get_cell_value(row, col)
             if cell_value and isinstance(cell_value, str):
@@ -755,6 +770,13 @@ class ExcelTableExtractorService:
                     import re
                     if re.search(r'単\d+号', cell_str):
                         return True
+                
+                # UPDATED: Treat "計" as definitive subtable end marker
+                if cell_str == "計":
+                    return True
+                # Also check for other definitive end patterns
+                if any(pattern in cell_str for pattern in ["合計", "総計", "全計", "最終計"]):
+                    return True
 
         # Check for many consecutive empty rows (more than 10)
         empty_row_count = 0
@@ -803,19 +825,34 @@ class ExcelTableExtractorService:
 
     def _find_subtable_end(self, extractor, header_row: int) -> int:
         """
-        Find the end row of the subtable: the next reference/header or end of sheet.
+        Find the end row of the subtable: the next reference/header, "計" marker, or end of sheet.
+        UPDATED: Now checks for "計" (total) as subtable end marker.
         """
         ws = extractor.worksheet
         max_row = ws.max_row
-        # Look for the next reference/header row (cell in column 2 matching '単\d+号')
+        # Look for the next reference/header row or "計" marker
         for row in range(header_row + 1, max_row + 1):
+            # Check for next reference number (cell in column 2 matching '単\d+号')
             cell_value = ws.cell(row=row, column=2).value
             if cell_value and isinstance(cell_value, str):
                 # If this row looks like a reference (e.g., '単12号'), treat as end
                 import re
                 if re.search(r'単\d+号', cell_value):
                     return row - 1  # End at the row before the next reference
-        return max_row  # If no more references, end at last row
+            
+            # UPDATED: Check for "計" (total) marker in any column of this row
+            for col in range(1, min(ws.max_column + 1, 10)):
+                check_cell_value = extractor.get_cell_value(row, col)
+                if check_cell_value and isinstance(check_cell_value, str):
+                    cell_str = check_cell_value.strip()
+                    # UPDATED: Treat "計" as definitive subtable end marker
+                    if cell_str == "計":
+                        return row - 1  # End at the row before the "計" row
+                    # Also check for other definitive end patterns
+                    if any(pattern in cell_str for pattern in ["合計", "総計", "全計", "最終計"]):
+                        return row - 1  # End at the row before the total row
+                        
+        return max_row  # If no more references or totals, end at last row
 
     def _extract_using_standalone_logic(self, file_path: str, sheet_name: str) -> List[TenderItem]:
         """
