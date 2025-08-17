@@ -96,7 +96,7 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
     """
     data_rows = []
     current_row = header_row + 1
-    
+
     # Use the provided column positions
     general_item_col = 1  # Column 1: General item category (排水管, etc.)
     item_name_col = column_positions.get(
@@ -242,6 +242,111 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
     return data_rows
 
 
+def extract_table_title_items_from_excel(df: pd.DataFrame, reference_row: int, header_row: int) -> Optional[Dict[str, str]]:
+    """
+    Extract table title items from the reference row itself in Excel.
+    The table title information is embedded in the reference row structure.
+
+    Args:
+        df: The DataFrame containing the Excel data
+        reference_row: Index of the row containing the reference number
+        header_row: Index of the row containing column headers
+
+    Returns:
+        Dictionary with table title items or None if not found
+    """
+    if reference_row >= len(df):
+        return None
+
+    # Extract table title from the reference row itself
+    reference_row_data = df.iloc[reference_row].fillna('')
+    if reference_row_data.empty:
+        return None
+
+    # Get non-empty cells from the reference row
+    non_empty_cells = [
+        cell for cell in reference_row_data if cell and str(cell).strip()]
+
+    # We need at least 6 items for a valid table title structure
+    if len(non_empty_cells) >= 6:
+        # Check if this has the table title structure:
+        # [Reference, Item Name, Specification, 単位, Unit, 単位数量, Quantity, ...]
+        item2 = str(non_empty_cells[2]) if len(non_empty_cells) > 2 else ""
+        item4 = str(non_empty_cells[4]) if len(non_empty_cells) > 4 else ""
+
+        # Check if item2 contains "単位" and item4 contains "単位数量"
+        if "単位" in item2 and "単位数量" in item4:
+            # Extract the items
+            item1 = str(non_empty_cells[0]).strip()  # Reference number
+            item1_2 = str(non_empty_cells[1]).strip() if len(
+                non_empty_cells) > 1 else ""  # Item name
+
+            # Extract unit value - it's in cell 3
+            unit_value = str(non_empty_cells[3]).strip() if len(
+                non_empty_cells) > 3 else ""
+
+            # Extract unit quantity value - it's in cell 5
+            unit_quantity_value = str(non_empty_cells[5]).strip() if len(
+                non_empty_cells) > 5 else ""
+
+            # Create table title structure - item1_2 can be empty, that's okay
+            table_title = {
+                "item_name": f"{item1} {item1_2}".strip(),
+                "unit": unit_value,
+                "unit_quantity": unit_quantity_value
+            }
+
+            logger.info(
+                f"Found table title items in Excel reference row: {table_title}")
+            return table_title
+
+    return None
+
+
+def extract_unit_value(cell_text: str) -> str:
+    """
+    Extract unit value from cell text that contains "単位".
+    Returns everything after "単位" until the next meaningful separator.
+    """
+    if not cell_text or "単位" not in cell_text:
+        return ""
+
+    # Find the position of "単位"
+    unit_pos = cell_text.find("単位")
+    if unit_pos == -1:
+        return ""
+
+    # Extract everything after "単位"
+    after_unit = cell_text[unit_pos + 2:].strip()
+
+    # Clean up the unit value - remove extra spaces and common separators
+    unit_value = after_unit.split()[0] if after_unit else ""
+
+    return unit_value
+
+
+def extract_unit_quantity_value(cell_text: str) -> str:
+    """
+    Extract unit quantity value from cell text that contains "単位数量".
+    Returns everything after "単位数量" until the next meaningful separator.
+    """
+    if not cell_text or "単位数量" not in cell_text:
+        return ""
+
+    # Find the position of "単位数量"
+    unit_qty_pos = cell_text.find("単位数量")
+    if unit_qty_pos == -1:
+        return ""
+
+    # Extract everything after "単位数量"
+    after_unit_qty = cell_text[unit_qty_pos + 4:].strip()
+
+    # Clean up the quantity value - remove extra spaces and common separators
+    quantity_value = after_unit_qty.split()[0] if after_unit_qty else ""
+
+    return quantity_value
+
+
 def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) -> List[Dict]:
     """
     Main API function to extract subtables from a specific Excel sheet
@@ -284,6 +389,10 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                         df, current_row + 1)
 
                     if header_row is not None:
+                        # Extract table title items between reference row and header row
+                        table_title_items = extract_table_title_items_from_excel(
+                            df, current_row, header_row)
+
                         # Extract data rows
                         data_rows = extract_subtable_data(
                             df, header_row, column_positions, reference_number)
@@ -298,6 +407,11 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                                 'data_rows': data_rows,
                                 'total_rows': len(data_rows)
                             }
+
+                            # Add table title items if they exist
+                            if table_title_items:
+                                subtable['table_title'] = table_title_items
+
                             subtables.append(subtable)
                             logger.info(
                                 f"Extracted subtable '{reference_number}' with {len(data_rows)} data rows")
