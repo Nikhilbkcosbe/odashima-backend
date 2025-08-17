@@ -1,3 +1,4 @@
+from subtable_pdf_extractor import SubtablePDFExtractor, extract_subtables_api
 import pdfplumber
 import os
 import re
@@ -8,7 +9,6 @@ from ..schemas.tender import TenderItem, SubtableItem
 # Import the new subtable extractor
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-from subtable_pdf_extractor import SubtablePDFExtractor, extract_subtables_api
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -243,33 +243,37 @@ class PDFParser:
         logger.info("=== USING NEW API-READY PDF SUBTABLE EXTRACTOR ===")
         logger.info(f"PDF file: {pdf_path}")
         logger.info(f"Page range: {start_page} to {end_page}")
-        
+
         all_subtable_items = []
 
         try:
             # Determine page range
             with pdfplumber.open(pdf_path) as pdf:
                 total_pages = len(pdf.pages)
-                
+
                 # Default to full range if not specified
                 actual_start = start_page if start_page is not None else 1
                 actual_end = end_page if end_page is not None else total_pages
-                
+
                 # Validate page range
                 actual_start = max(1, actual_start)
                 actual_end = min(total_pages, actual_end)
-                
-                logger.info(f"Processing pages {actual_start} to {actual_end} of {total_pages} total pages")
+
+                logger.info(
+                    f"Processing pages {actual_start} to {actual_end} of {total_pages} total pages")
 
             # Use the new API-ready subtable extractor
             extractor = SubtablePDFExtractor()
-            result = extractor.extract_subtables_from_pdf(pdf_path, actual_start, actual_end)
-            
+            result = extractor.extract_subtables_from_pdf(
+                pdf_path, actual_start, actual_end)
+
             if "error" in result:
-                logger.error(f"New subtable extractor failed: {result['error']}")
+                logger.error(
+                    f"New subtable extractor failed: {result['error']}")
                 return []
 
-            logger.info(f"NEW API extracted {result['total_subtables']} subtables with {result['total_rows']} total rows")
+            logger.info(
+                f"NEW API extracted {result['total_subtables']} subtables with {result['total_rows']} total rows")
 
             # Convert the new API response to SubtableItem format
             for subtable in result.get("subtables", []):
@@ -288,7 +292,8 @@ class PDFParser:
                         # Parse quantity
                         try:
                             # Handle various number formats and commas
-                            quantity = float(quantity_str.replace(',', '').replace('，', '')) if quantity_str else 0.0
+                            quantity = float(quantity_str.replace(
+                                ',', '').replace('，', '')) if quantity_str else 0.0
                         except (ValueError, TypeError):
                             quantity = 0.0
 
@@ -303,6 +308,9 @@ class PDFParser:
 
                         # Create SubtableItem only if we have a valid item name
                         if item_name:
+                            # Get table title from the subtable
+                            table_title = subtable.get("table_title", None)
+
                             subtable_item = SubtableItem(
                                 item_key=item_name,
                                 raw_fields=raw_fields,
@@ -311,20 +319,24 @@ class PDFParser:
                                 source="PDF",
                                 page_number=page_number,
                                 reference_number=reference_number,
-                                sheet_name=None  # PDF doesn't have sheet names
+                                sheet_name=None,  # PDF doesn't have sheet names
+                                table_title=table_title
                             )
                             all_subtable_items.append(subtable_item)
 
                     except Exception as e:
-                        logger.error(f"Error converting subtable row to SubtableItem: {e}")
+                        logger.error(
+                            f"Error converting subtable row to SubtableItem: {e}")
                         logger.error(f"Row data: {row}")
                         continue
 
-            logger.info(f"Successfully converted {len(all_subtable_items)} subtable items using NEW API")
+            logger.info(
+                f"Successfully converted {len(all_subtable_items)} subtable items using NEW API")
 
         except Exception as e:
             logger.error(f"Error using new API subtable extractor: {e}")
-            logger.error("NEW subtable extraction failed - returning empty list")
+            logger.error(
+                "NEW subtable extraction failed - returning empty list")
             return []
 
         return all_subtable_items

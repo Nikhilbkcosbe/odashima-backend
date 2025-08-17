@@ -1,5 +1,9 @@
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from subtable_title_comparator import compare_all_subtable_titles, compare_all_subtable_titles_from_cached_data
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from typing import List, Optional
+from typing import List, Optional, Dict
 import tempfile
 import os
 import gc
@@ -661,7 +665,7 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
             status_code=500, detail=f"Comparison error: {str(e)}")
 
 
-@router.post("/compare-cached-subtables")
+@router.post("/compare-cached-subtables", response_model=SubtableComparisonSummary)
 async def compare_cached_subtables(session_id: str = Form(...)):
     """
     OPTIMIZED SUBTABLE COMPARISON: Get subtables using cached extraction results.
@@ -693,7 +697,7 @@ async def compare_cached_subtables(session_id: str = Form(...)):
         logger.info(
             f"Using cached subtable data: {len(pdf_subtables)} PDF subtables, {len(excel_subtables)} Excel subtables")
 
-        # Create response using SubtableComparisonSummary schema
+        # Create response using the original schema
         result = SubtableComparisonSummary(
             total_pdf_subtables=len(pdf_subtables),
             total_excel_subtables=len(excel_subtables),
@@ -2324,3 +2328,197 @@ async def compare_matching_methods(
                 pass
 
         gc.collect()
+
+
+@router.post("/compare-subtable-titles", response_model=Dict)
+async def compare_subtable_titles_api(
+    pdf_file: UploadFile = File(...),
+    excel_file: UploadFile = File(...),
+    pdf_subtable_start_page: Optional[int] = Form(13),
+    pdf_subtable_end_page: Optional[int] = Form(82)
+) -> Dict:
+    """
+    Compare subtable titles between PDF and Excel files.
+
+    Args:
+        pdf_file: PDF document containing subtables
+        excel_file: Excel document containing subtables
+        pdf_subtable_start_page: Starting page for PDF subtable extraction
+        pdf_subtable_end_page: Ending page for PDF subtable extraction
+
+    Returns:
+        Dictionary with title comparison results
+    """
+    logger.info("=== STARTING SUBTABLE TITLE COMPARISON ===")
+    logger.info(f"PDF file: {pdf_file.filename}")
+    logger.info(f"Excel file: {excel_file.filename}")
+    logger.info(
+        f"PDF subtable page range: {pdf_subtable_start_page} to {pdf_subtable_end_page}")
+
+    # Validate file types
+    if not pdf_file.filename.lower().endswith('.pdf'):
+        logger.error(f"Invalid PDF file: {pdf_file.filename}")
+        raise HTTPException(status_code=400, detail="PDF file required")
+    if not excel_file.filename.lower().endswith(('.xlsx', '.xls')):
+        logger.error(f"Invalid Excel file: {excel_file.filename}")
+        raise HTTPException(status_code=400, detail="Excel file required")
+
+    pdf_fd = None
+    pdf_path = None
+    excel_fd = None
+    excel_path = None
+
+    try:
+        # Handle PDF file (requires temporary file)
+        pdf_fd, pdf_path = tempfile.mkstemp(
+            suffix='.pdf', prefix='title_comp_')
+        pdf_content = await pdf_file.read()
+        logger.info(f"PDF file size: {len(pdf_content)} bytes")
+
+        with os.fdopen(pdf_fd, 'wb') as f:
+            f.write(pdf_content)
+        pdf_fd = None
+
+        # Handle Excel file (requires temporary file)
+        excel_fd, excel_path = tempfile.mkstemp(
+            suffix='.xlsx', prefix='title_comp_')
+        excel_content = await excel_file.read()
+        logger.info(f"Excel file size: {len(excel_content)} bytes")
+
+        with os.fdopen(excel_fd, 'wb') as f:
+            f.write(excel_content)
+        excel_fd = None
+
+        # Run title comparison
+        logger.info("Running subtable title comparison...")
+        result = compare_all_subtable_titles(
+            pdf_path,
+            excel_path,
+            pdf_subtable_start_page,
+            pdf_subtable_end_page
+        )
+
+        logger.info("=== SUBTABLE TITLE COMPARISON COMPLETED ===")
+        return result
+
+    except Exception as e:
+        logger.error(
+            f"Error in subtable title comparison: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Subtable title comparison error: {str(e)}"
+        )
+    finally:
+        # Cleanup temporary files
+        if pdf_fd is not None:
+            try:
+                os.close(pdf_fd)
+            except:
+                pass
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.unlink(pdf_path)
+            except:
+                pass
+        if excel_fd is not None:
+            try:
+                os.close(excel_fd)
+            except:
+                pass
+        if excel_path and os.path.exists(excel_path):
+            try:
+                os.unlink(excel_path)
+            except:
+                pass
+
+
+@router.post("/compare-subtable-titles-cached", response_model=Dict)
+async def compare_subtable_titles_cached_api(session_id: str = Form(...)) -> Dict:
+    """
+    Compare subtable titles using cached extraction results.
+
+    Args:
+        session_id: Session identifier from extract-and-cache endpoint
+
+    Returns:
+        Dictionary with title comparison results
+    """
+    logger.info(
+        f"=== STARTING CACHED SUBTABLE TITLE COMPARISON FOR SESSION {session_id} ===")
+    logger.info(f"🔍 Received session_id: {session_id}")
+    logger.info(f"🔍 Session_id type: {type(session_id)}")
+    logger.info(f"🔍 Session_id length: {len(session_id) if session_id else 0}")
+
+    try:
+        # Get cached extraction results
+        cache_service = get_extraction_cache()
+        logger.info(f"🔍 Cache service instance: {id(cache_service)}")
+
+        # Check cache statistics before retrieval
+        stats = cache_service.get_cache_stats()
+        logger.info(f"🔍 Cache stats before retrieval: {stats}")
+
+        cached_data = cache_service.get_extraction_results(session_id)
+        logger.info(
+            f"🔍 Cached data retrieved: {'Yes' if cached_data else 'No'}")
+
+        if not cached_data:
+            logger.error(f"❌ Session {session_id} not found in cache")
+            logger.error(
+                f"❌ Available sessions: {list(cache_service._cache.keys()) if hasattr(cache_service, '_cache') else 'No cache access'}")
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found or expired. Please re-extract files first."
+            )
+
+        # Extract cached subtable data
+        pdf_subtables = cached_data.get('pdf_subtables', [])
+        excel_subtables = cached_data.get('excel_subtables', [])
+
+        if not pdf_subtables or not excel_subtables:
+            raise HTTPException(
+                status_code=400,
+                detail="No subtable data found in cached session. Please re-extract files."
+            )
+
+        logger.info(
+            f"Found {len(pdf_subtables)} PDF subtables and {len(excel_subtables)} Excel subtables in cache")
+
+        # Run title comparison using cached data
+        full_result = compare_all_subtable_titles_from_cached_data(
+            pdf_subtables, excel_subtables)
+
+        # Filter to only include mismatches and simplify the structure
+        mismatches_only = []
+        for comparison in full_result.get("comparisons", []):
+            if not comparison.get("overall_match", True):  # Only include mismatches
+                mismatch_data = {
+                    "reference_number": comparison.get("pdf_reference", ""),
+                    "pdf_title": comparison.get("pdf_title", {}),
+                    "excel_title": comparison.get("excel_title", "")
+                }
+                mismatches_only.append(mismatch_data)
+
+        # Create simplified result with only mismatch data
+        result = {
+            "summary": {
+                "total_mismatches": len(mismatches_only),
+                "pdf_subtables_with_titles": full_result.get("summary", {}).get("pdf_subtables_with_titles", 0),
+                "excel_subtables_with_titles": full_result.get("summary", {}).get("excel_subtables_with_titles", 0)
+            },
+            "mismatches": mismatches_only
+        }
+
+        logger.info("=== CACHED SUBTABLE TITLE COMPARISON COMPLETED ===")
+        logger.info(f"Found {len(mismatches_only)} title mismatches")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error in cached subtable title comparison: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cached subtable title comparison error: {str(e)}"
+        )

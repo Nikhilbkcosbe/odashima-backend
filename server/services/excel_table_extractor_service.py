@@ -1,3 +1,4 @@
+from excel_subtable_api import extract_all_subtables_api
 from typing import List, Dict, Any, Optional
 from io import BytesIO
 import logging
@@ -18,7 +19,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 # Import the new API-ready subtable extractor
 backend_dir = os.path.join(os.path.dirname(__file__), '..', '..')
 sys.path.insert(0, backend_dir)
-from excel_subtable_api import extract_all_subtables_api
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -163,14 +163,16 @@ class ExcelTableExtractorService:
             api_result = extract_all_subtables_api(tmp_file_path)
 
             if not api_result.get("success", False):
-                logger.error(f"New API extraction failed: {api_result.get('message', 'Unknown error')}")
+                logger.error(
+                    f"New API extraction failed: {api_result.get('message', 'Unknown error')}")
                 return []
 
-            logger.info(f"NEW API extracted {api_result['total_subtables']} subtables from {api_result['total_sheets_processed']} sheets")
+            logger.info(
+                f"NEW API extracted {api_result['total_subtables']} subtables from {api_result['total_sheets_processed']} sheets")
 
             # Convert the new API response to SubtableItem format
             all_subtables = api_result.get("all_subtables", [])
-            
+
             for subtable in all_subtables:
                 # Each subtable contains data_rows which need to be converted to SubtableItem objects
                 reference_number = subtable.get('reference_number', '')
@@ -183,10 +185,11 @@ class ExcelTableExtractorService:
                         item_name = data_row.get('名称', '').strip()
                         unit = data_row.get('単位', '').strip()
                         quantity_str = data_row.get('数量', '').strip()
-                        
+
                         # Parse quantity
                         try:
-                            quantity = float(quantity_str.replace(',', '')) if quantity_str else 0.0
+                            quantity = float(quantity_str.replace(
+                                ',', '')) if quantity_str else 0.0
                         except Exception:
                             quantity = 0.0
 
@@ -202,6 +205,9 @@ class ExcelTableExtractorService:
 
                         # Create SubtableItem
                         if item_name:  # Only create items with valid names
+                            # Get table title from the subtable
+                            table_title = subtable.get("table_title", None)
+
                             subtable_item = SubtableItem(
                                 item_key=item_name,
                                 raw_fields=raw_fields,
@@ -209,15 +215,18 @@ class ExcelTableExtractorService:
                                 unit=unit,
                                 source="Excel",
                                 reference_number=reference_number,
-                                sheet_name=sheet_name
+                                sheet_name=sheet_name,
+                                table_title=table_title
                             )
                             all_subtable_items.append(subtable_item)
 
                     except Exception as e:
-                        logger.error(f"Error converting data row to SubtableItem: {e}")
+                        logger.error(
+                            f"Error converting data row to SubtableItem: {e}")
                         continue
 
-            logger.info(f"Successfully converted {len(all_subtable_items)} subtable items using NEW API")
+            logger.info(
+                f"Successfully converted {len(all_subtable_items)} subtable items using NEW API")
 
         except Exception as e:
             logger.error(f"Error using new API subtable extractor: {e}")

@@ -3,6 +3,7 @@ import re
 import json
 import logging
 from typing import List, Dict, Optional, Tuple, Any
+from table_title_extractor import extract_pdf_table_title_items
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -259,13 +260,17 @@ class SubtablePDFExtractor:
 
                 # Only treat as subtable header if we found valid column headers
                 if column_mapping and header_row_idx is not None:
-                    # Extract table title items between reference row and header row
-                    table_title_items = self._extract_table_title_items(
-                        table, row_idx, header_row_idx)
-
                     current_reference = found_reference
                     current_column_mapping = column_mapping
-                    current_table_title = table_title_items  # Store table title items
+
+                    # Extract table title from the reference row
+                    table_title = extract_pdf_table_title_items(
+                        table, row_idx, header_row_idx)
+                    if table_title:
+                        current_table_title = table_title
+                        logger.info(
+                            f"Extracted table title for {found_reference}: {table_title}")
+
                     # Skip to after the header row for data extraction
                     continue
                 else:
@@ -506,80 +511,11 @@ class SubtablePDFExtractor:
             "rows": rows
         }
 
-        # Add table title items if they exist
+        # Add table title if available
         if table_title:
             subtable_dict["table_title"] = table_title
 
         return subtable_dict
-
-    def _extract_table_title_items(self, table: List[List[str]], reference_row_idx: int, header_row_idx: int) -> Optional[Dict[str, str]]:
-        """
-        Extract table title items from the reference row itself.
-        The table title information is embedded in the reference row structure.
-
-        Args:
-            table: The table data
-            reference_row_idx: Index of the row containing the reference number
-            header_row_idx: Index of the row containing column headers
-
-        Returns:
-            Dictionary with table title items or None if not found
-        """
-        if reference_row_idx >= len(table):
-            return None
-
-        # Extract table title from the reference row itself
-        reference_row = table[reference_row_idx]
-        if not reference_row:
-            return None
-
-        # Get non-empty cells from the reference row
-        non_empty_cells = [
-            cell for cell in reference_row if cell and str(cell).strip()]
-
-        # We need at least 6 items for a valid table title structure
-        if len(non_empty_cells) >= 6:
-            # Find the positions of "単位" and "単位数量" in the cells
-            unit_pos = -1
-            unit_qty_pos = -1
-
-            for i, cell in enumerate(non_empty_cells):
-                cell_str = str(cell).strip()
-                if "単位" in cell_str and "単位数量" not in cell_str:
-                    unit_pos = i
-                elif "単位数量" in cell_str:
-                    unit_qty_pos = i
-
-            # Check if we found both "単位" and "単位数量"
-            if unit_pos != -1 and unit_qty_pos != -1 and unit_pos < unit_qty_pos:
-                # Extract the items based on the structure
-                # Reference number (単1号, etc.)
-                reference_number = str(non_empty_cells[0]).strip()
-
-                # Extract item name from the cell after reference number (cell 1)
-                item_name = str(non_empty_cells[1]).strip() if len(
-                    non_empty_cells) > 1 else ""
-
-                # Extract unit value - it's in the cell after "単位"
-                unit_value = str(
-                    non_empty_cells[unit_pos + 1]).strip() if unit_pos + 1 < len(non_empty_cells) else ""
-
-                # Extract unit quantity value - it's in the cell after "単位数量"
-                unit_quantity_value = str(
-                    non_empty_cells[unit_qty_pos + 1]).strip() if unit_qty_pos + 1 < len(non_empty_cells) else ""
-
-                # Create table title structure - item_name is the actual item name, not including reference number
-                table_title = {
-                    "item_name": item_name,
-                    "unit": unit_value,
-                    "unit_quantity": unit_quantity_value
-                }
-
-                logger.info(
-                    f"Found table title items in reference row: {table_title}")
-                return table_title
-
-        return None
 
     def _extract_unit_value(self, cell_text: str) -> str:
         """

@@ -30,6 +30,8 @@ class SubtableItem(BaseModel):
         None, description="Reference number like '単 3号' associated with this item")
     sheet_name: Optional[str] = Field(
         None, description="Excel sheet name where the item was found (for Excel items)")
+    table_title: Optional[Dict[str, str]] = Field(
+        None, description="Table title information with item_name, unit, and unit_quantity")
 
 
 class ComparisonResult(BaseModel):
@@ -45,7 +47,8 @@ class ComparisonResult(BaseModel):
         None, description="Difference in quantities if applicable")
     unit_mismatch: Optional[bool] = Field(
         None, description="Whether units are different")
-    type: Literal["Main Table", "Sub Table"] = Field(..., description="Indicates if the result is from the main table or sub table")
+    type: Literal["Main Table", "Sub Table"] = Field(
+        ..., description="Indicates if the result is from the main table or sub table")
 
 
 class ComparisonSummary(BaseModel):
@@ -75,10 +78,17 @@ class SubtableComparisonSummary(BaseModel):
 
 
 class SubtableComparisonResult(BaseModel):
-    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "MISSING", "EXTRA"] = Field(..., description="Comparison status for subtable")
-    pdf_item: Optional[SubtableItem] = Field(None, description="PDF subtable item if present")
-    excel_item: Optional[SubtableItem] = Field(None, description="Excel subtable item if present")
-    match_confidence: float = Field(..., description="Confidence score for the match (0-1)")
-    quantity_difference: Optional[float] = Field(None, description="Difference in quantities if applicable")
-    unit_mismatch: Optional[bool] = Field(None, description="Whether units are different")
-    type: Literal["Sub Table"] = Field("Sub Table", description="Indicates this result is from a sub table")
+    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "MISSING",
+                    "EXTRA"] = Field(..., description="Comparison status for subtable")
+    pdf_item: Optional[SubtableItem] = Field(
+        None, description="PDF subtable item if present")
+    excel_item: Optional[SubtableItem] = Field(
+        None, description="Excel subtable item if present")
+    match_confidence: float = Field(...,
+                                    description="Confidence score for the match (0-1)")
+    quantity_difference: Optional[float] = Field(
+        None, description="Difference in quantities if applicable")
+    unit_mismatch: Optional[bool] = Field(
+        None, description="Whether units are different")
+    type: Literal["Sub Table"] = Field(
+        "Sub Table", description="Indicates this result is from a sub table")
