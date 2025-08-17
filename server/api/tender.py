@@ -52,8 +52,10 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
 
         # Test the new API-ready subtable extraction
         logger.info("Testing new API-ready subtable extraction...")
-        excel_subtables = excel_table_extractor.extract_subtables_with_new_api(excel_content)
-        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtable items")
+        excel_subtables = excel_table_extractor.extract_subtables_with_new_api(
+            excel_content)
+        logger.info(
+            f"NEW API extracted {len(excel_subtables)} Excel subtable items")
 
         # Close Excel buffer
         excel_buffer.close()
@@ -62,22 +64,22 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
         logger.info("=== TESTING UNIT NORMALIZATION FIX ===")
         from ..services.matcher import Matcher
         matcher = Matcher()
-        
+
         # Test cases for the reported unit mismatch issue
         test_cases = [
             ("m", "ｍ"),      # half-width vs full-width m
-            ("t", "ｔ"),      # half-width vs full-width t  
+            ("t", "ｔ"),      # half-width vs full-width t
             ("kg", "ｋｇ"),   # half-width vs full-width kg
             ("m", "m"),      # identical units
             ("t", "t"),      # identical units
         ]
-        
+
         unit_test_results = []
         for pdf_unit, excel_unit in test_cases:
             pdf_normalized = matcher._normalize_unit(pdf_unit)
             excel_normalized = matcher._normalize_unit(excel_unit)
             match = pdf_normalized == excel_normalized
-            
+
             test_result = {
                 "pdf_unit": pdf_unit,
                 "excel_unit": excel_unit,
@@ -87,7 +89,8 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
                 "issue_type": "FIXED" if match else "STILL_MISMATCH"
             }
             unit_test_results.append(test_result)
-            logger.info(f"Unit test: '{pdf_unit}' vs '{excel_unit}' -> {pdf_normalized} vs {excel_normalized} = {'MATCH' if match else 'MISMATCH'}")
+            logger.info(
+                f"Unit test: '{pdf_unit}' vs '{excel_unit}' -> {pdf_normalized} vs {excel_normalized} = {'MATCH' if match else 'MISMATCH'}")
 
         # Create summary response
         summary = {
@@ -116,8 +119,10 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
         return summary
 
     except Exception as e:
-        logger.error(f"Error during new extraction test: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Test extraction error: {str(e)}")
+        logger.error(
+            f"Error during new extraction test: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Test extraction error: {str(e)}")
 
     finally:
         gc.collect()
@@ -234,11 +239,13 @@ async def extract_and_cache_files(
         )
         logger.info(f"Extracted {len(pdf_subtables)} PDF subtable items")
 
-        logger.info("Extracting subtables from Excel using NEW API-ready extraction...")
+        logger.info(
+            "Extracting subtables from Excel using NEW API-ready extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or '', excel_items
         )
-        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtable items")
+        logger.info(
+            f"NEW API extracted {len(excel_subtables)} Excel subtable items")
 
         # Close Excel buffer
         excel_buffer.close()
@@ -321,10 +328,10 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
     """
     OPTIMIZED COMPARISON: Get both extra items (Excel not in PDF) and missing items (PDF not in Excel)
     using cached extraction results. This is much faster as it skips the extraction phase entirely.
-    
+
     Args:
         session_id: Session identifier from extract-and-cache endpoint
-        
+
     Returns:
         Complete comparison results including both extra and missing items
     """
@@ -358,29 +365,38 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         extra_main_items = matcher.get_extra_items_only_simplified(
             pdf_items, excel_items)
 
-        # Main table missing items (PDF items not in Excel - simplified matching)
-        missing_main_items = matcher.get_extra_items_only_simplified(
-            excel_items, pdf_items)
+        # Main table missing items (PDF items not in Excel)
+        # IMPORTANT: Strict name-only missing detection (exact match, ignore quantity/unit)
+        missing_main_items = matcher.get_missing_items_by_name_only_strict(
+            pdf_items, excel_items)
 
         # Subtable extra items (Excel subtables not in PDF)
         extra_subtable_items = matcher.get_extra_subtable_items_only(
             pdf_subtables, excel_subtables)
 
         # Subtable missing items (PDF subtables not in Excel)
-        missing_subtable_items = matcher.get_extra_subtable_items_only(
-            excel_subtables, pdf_subtables)
-        
+        # Use comprehensive comparison and pick those marked as MISSING
+        _subtable_results_for_missing = matcher.compare_subtable_items(
+            pdf_subtables, excel_subtables)
+        missing_subtable_items = [
+            r.pdf_item for r in _subtable_results_for_missing if r.status == 'MISSING' and r.pdf_item is not None]
+
         # QUANTITY AND UNIT MISMATCH ANALYSIS
         # Get quantity mismatches for main table items
-        main_quantity_mismatches = matcher.get_mismatched_items_only(pdf_items, excel_items)
-        
+        main_quantity_mismatches = matcher.get_mismatched_items_only(
+            pdf_items, excel_items)
+
         # Get unit mismatches for main table items
-        main_unit_mismatches = matcher.get_unit_mismatched_items_only(pdf_items, excel_items)
-        
+        main_unit_mismatches = matcher.get_unit_mismatched_items_only(
+            pdf_items, excel_items)
+
         # For subtables, we need to use the comprehensive comparison
-        subtable_results = matcher.compare_subtable_items(pdf_subtables, excel_subtables)
-        subtable_quantity_mismatches = [r for r in subtable_results if r.status == 'QUANTITY_MISMATCH']
-        subtable_unit_mismatches = [r for r in subtable_results if r.status == 'UNIT_MISMATCH']
+        subtable_results = matcher.compare_subtable_items(
+            pdf_subtables, excel_subtables)
+        subtable_quantity_mismatches = [
+            r for r in subtable_results if r.status == 'QUANTITY_MISMATCH']
+        subtable_unit_mismatches = [
+            r for r in subtable_results if r.status == 'UNIT_MISMATCH']
 
         # Combine EXTRA items (Excel items not in PDF) for frontend display
         combined_extra_items = []
@@ -439,15 +455,17 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
             })
 
         logger.info(f"=== CACHED COMPARISON COMPLETED ===")
-        logger.info(f"Extra items: {len(extra_main_items)} main, {len(extra_subtable_items)} subtable")
-        logger.info(f"Missing items: {len(missing_main_items)} main, {len(missing_subtable_items)} subtable")
+        logger.info(
+            f"Extra items: {len(extra_main_items)} main, {len(extra_subtable_items)} subtable")
+        logger.info(
+            f"Missing items: {len(missing_main_items)} main, {len(missing_subtable_items)} subtable")
 
         # Calculate detailed breakdown for comprehensive summary
         pdf_main_total = len(pdf_items)
         pdf_subtable_total = len(pdf_subtables)
         excel_main_total = len(excel_items)
         excel_subtable_total = len(excel_subtables)
-        
+
         return {
             "session_id": session_id,
             # Basic totals
@@ -455,25 +473,25 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
             "total_excel_items": excel_main_total,
             "total_pdf_subtables": pdf_subtable_total,
             "total_excel_subtables": excel_subtable_total,
-            
+
             # Extra items (Excel items not in PDF)
             "extra_items_count": len(combined_extra_items),
             "extra_main_items_count": len(extra_main_items),
             "extra_subtable_items_count": len(extra_subtable_items),
             "extra_items": combined_extra_items,
-            
+
             # Missing items (PDF items not in Excel) - FIXED: Now included!
             "missing_items_count": len(combined_missing_items),
             "missing_main_items_count": len(missing_main_items),
             "missing_subtable_items_count": len(missing_subtable_items),
             "missing_items": combined_missing_items,
-            
+
             # Quantity and Unit mismatch data
             "quantity_mismatches_count": len(main_quantity_mismatches) + len(subtable_quantity_mismatches),
             "quantity_mismatches": main_quantity_mismatches + subtable_quantity_mismatches,
             "unit_mismatches_count": len(main_unit_mismatches) + len(subtable_unit_mismatches),
             "unit_mismatches": main_unit_mismatches + subtable_unit_mismatches,
-            
+
             # DETAILED BREAKDOWN FOR SUMMARY CARDS
             "detailed_breakdown": {
                 "pdf_analysis": {
@@ -1116,13 +1134,14 @@ async def compare_tender_files_missing_only(
         logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
-        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
+        logger.info(
+            f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         excel_buffer.close()
 
         matcher = Matcher()
-        # Main table missing items
-        main_missing_items = matcher.get_missing_items_only(
+        # Main table missing items (STRICT name-only)
+        main_missing_items = matcher.get_missing_items_by_name_only_strict(
             pdf_items, excel_items)
         # Subtable missing items (use only those with status == 'MISSING')
         subtable_results = matcher.compare_subtable_items(
@@ -1288,7 +1307,8 @@ async def compare_tender_files_mismatches_only(
         logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
-        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
+        logger.info(
+            f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         excel_buffer.close()
 
@@ -1661,7 +1681,8 @@ async def compare_tender_files_extra_items_only(
         logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, sheet_name or (excel_buffer and getattr(excel_buffer, 'name', None)) or '', main_table_items)
-        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
+        logger.info(
+            f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         excel_buffer.close()
 
@@ -1891,7 +1912,8 @@ async def compare_subtables(
             "Extracting subtables from Excel using NEW API-ready logic...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
             excel_buffer, main_sheet_name, main_table_items)
-        logger.info(f"NEW API extracted {len(excel_subtables)} Excel subtables")
+        logger.info(
+            f"NEW API extracted {len(excel_subtables)} Excel subtables")
 
         # Close Excel buffer
         excel_buffer.close()

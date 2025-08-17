@@ -71,11 +71,13 @@ class Matcher:
         # ENHANCED: Normalize keys for matching using the normalizer
         def make_key(item):
             # Normalize item name using the normalizer
-            normalized_item_key = self.normalizer.normalize_item(item.item_key) if item.item_key else ''
-            
+            normalized_item_key = self.normalizer.normalize_item(
+                item.item_key) if item.item_key else ''
+
             # Normalize reference number (handle spacing issues like "単 1号" vs "単1号")
-            normalized_ref = item.reference_number.strip().replace(' ', '').replace('　', '') if item.reference_number else ''
-            
+            normalized_ref = item.reference_number.strip().replace(
+                ' ', '').replace('　', '') if item.reference_number else ''
+
             return (normalized_item_key, normalized_ref)
 
         pdf_dict = {make_key(item): item for item in pdf_subtables}
@@ -256,7 +258,7 @@ class Matcher:
 
         # Strip whitespace
         normalized = str(unit).strip()
-        
+
         # CRITICAL FIX: Convert full-width characters to half-width BEFORE other processing
         # This handles cases like "ｍ" (full-width) vs "m" (half-width)
         full_to_half_map = str.maketrans(
@@ -270,14 +272,14 @@ class Matcher:
             '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
         )
         normalized = normalized.translate(full_to_half_map)
-        
+
         # Convert to lowercase after width normalization
         normalized = normalized.lower()
 
         # Handle common variations
         unit_mappings = {
             "m2": "㎡",
-            "m3": "㎥", 
+            "m3": "㎥",
             "m²": "㎡",
             "m³": "㎥",
             "平方メートル": "㎡",
@@ -292,15 +294,15 @@ class Matcher:
             # Additional mappings for full-width units that might remain
             "ｍ": "m",  # Full-width m -> half-width m
             "ｔ": "t",  # Full-width t -> half-width t
-            "ｋｇ": "kg", # Full-width kg -> half-width kg
+            "ｋｇ": "kg",  # Full-width kg -> half-width kg
         }
 
         result = unit_mappings.get(normalized, normalized)
-        
+
         # Debug logging for unit mismatches
         if unit != result:
             logger.debug(f"Unit normalized: '{unit}' -> '{result}'")
-            
+
         return result
 
     def _create_comparison_result(self, pdf_item: TenderItem, excel_item: TenderItem,
@@ -464,6 +466,34 @@ class Matcher:
         logger.info(f"Found {len(missing_items)} missing items")
         return missing_items
 
+    def get_missing_items_by_name_only_strict(self, pdf_items: List[TenderItem], excel_items: List[TenderItem]) -> List[TenderItem]:
+        """
+        Return missing items considering ONLY item name (strict match), ignoring quantity and unit.
+        Strict means exact string equality after trimming outer whitespace.
+        No fuzzy/normalization is applied.
+        """
+        logger.info("Getting missing items by strict name-only matching...")
+
+        # Use the same normalizer as the rest of the system to eliminate
+        # whitespace/newline/full-width differences while staying name-only
+        excel_names = set()
+        for item in excel_items:
+            if item and item.item_key is not None:
+                name = self.normalizer.normalize_item(str(item.item_key))
+                if name:
+                    excel_names.add(name)
+
+        missing: List[TenderItem] = []
+        for pdf_item in pdf_items:
+            if pdf_item and pdf_item.item_key is not None:
+                pdf_name = self.normalizer.normalize_item(
+                    str(pdf_item.item_key))
+                if pdf_name and pdf_name not in excel_names:
+                    missing.append(pdf_item)
+
+        logger.info(f"Found {len(missing)} strict name-only missing items")
+        return missing
+
     def get_mismatched_items_only(self, pdf_items: List[TenderItem], excel_items: List[TenderItem]) -> List[ComparisonResult]:
         """
         Quick method to get only the mismatched items (quantity differences).
@@ -519,7 +549,8 @@ class Matcher:
         """
         logger.info("Getting extra subtable items only...")
 
-        subtable_results = self.compare_subtable_items(pdf_subtables, excel_subtables)
+        subtable_results = self.compare_subtable_items(
+            pdf_subtables, excel_subtables)
 
         extra_subtable_items = []
         for result in subtable_results:
@@ -535,59 +566,67 @@ class Matcher:
         Compares ONLY item name, quantity, and unit as requested by the user.
         Uses the improved normalizer to handle complex characters properly.
         """
-        logger.info("Getting extra main table items with simplified matching...")
+        logger.info(
+            "Getting extra main table items with simplified matching...")
 
         def items_match(pdf_item: TenderItem, excel_item: TenderItem) -> bool:
             """Check if items match based only on name, quantity, and unit"""
             # Compare normalized item names using improved normalizer
             pdf_name = self.normalizer.normalize_item(pdf_item.item_key)
             excel_name = self.normalizer.normalize_item(excel_item.item_key)
-            
+
             # Check name similarity (exact match or very close)
-            names_match = (pdf_name == excel_name or 
-                          pdf_name in excel_name or 
-                          excel_name in pdf_name or
-                          (len(pdf_name) > 10 and len(excel_name) > 10 and 
-                           abs(len(pdf_name) - len(excel_name)) <= 2 and 
-                           pdf_name[:10] == excel_name[:10]))
-            
+            names_match = (pdf_name == excel_name or
+                           pdf_name in excel_name or
+                           excel_name in pdf_name or
+                           (len(pdf_name) > 10 and len(excel_name) > 10 and
+                            abs(len(pdf_name) - len(excel_name)) <= 2 and
+                            pdf_name[:10] == excel_name[:10]))
+
             if not names_match:
-                logger.debug(f"Names don't match: PDF='{pdf_name}' vs Excel='{excel_name}'")
+                logger.debug(
+                    f"Names don't match: PDF='{pdf_name}' vs Excel='{excel_name}'")
                 return False
-                
+
             # Compare quantities (with small tolerance)
-            quantity_match = abs(pdf_item.quantity - excel_item.quantity) < 0.001
-            
+            quantity_match = abs(pdf_item.quantity -
+                                 excel_item.quantity) < 0.001
+
             if not quantity_match:
-                logger.debug(f"Quantities don't match: PDF={pdf_item.quantity} vs Excel={excel_item.quantity}")
+                logger.debug(
+                    f"Quantities don't match: PDF={pdf_item.quantity} vs Excel={excel_item.quantity}")
                 return False
-            
+
             # Compare units (normalize and compare) - FIXED to use unit-specific normalization
             pdf_unit = self._normalize_unit(pdf_item.unit)
             excel_unit = self._normalize_unit(excel_item.unit)
             unit_match = pdf_unit == excel_unit
-            
+
             if not unit_match:
-                logger.debug(f"Units don't match: PDF='{pdf_unit}' vs Excel='{excel_unit}'")
+                logger.debug(
+                    f"Units don't match: PDF='{pdf_unit}' vs Excel='{excel_unit}'")
                 return False
-            
+
             return True
 
         # Find Excel items that don't have a matching PDF item
         extra_items = []
-        
+
         for excel_item in excel_items:
             found_match = False
-            
+
             for pdf_item in pdf_items:
                 if items_match(pdf_item, excel_item):
                     found_match = True
-                    logger.debug(f"Found match: Excel '{excel_item.item_key}' matches PDF '{pdf_item.item_key}'")
+                    logger.debug(
+                        f"Found match: Excel '{excel_item.item_key}' matches PDF '{pdf_item.item_key}'")
                     break
-            
+
             if not found_match:
                 extra_items.append(excel_item)
-                logger.info(f"Extra item found: '{excel_item.item_key}' (qty: {excel_item.quantity}, unit: {excel_item.unit})")
+                logger.info(
+                    f"Extra item found: '{excel_item.item_key}' (qty: {excel_item.quantity}, unit: {excel_item.unit})")
 
-        logger.info(f"Found {len(extra_items)} extra main table items using simplified matching")
+        logger.info(
+            f"Found {len(extra_items)} extra main table items using simplified matching")
         return extra_items
