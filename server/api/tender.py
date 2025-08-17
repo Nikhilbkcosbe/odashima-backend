@@ -13,6 +13,7 @@ from ..services.matcher import Matcher
 from ..services.excel_table_extractor_service import ExcelTableExtractorService
 from ..services.normalizer import Normalizer
 from ..services.extraction_cache_service import get_extraction_cache
+from ..services.spec_extractor import SpecFinalExtractor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -125,6 +126,52 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
             status_code=500, detail=f"Test extraction error: {str(e)}")
 
     finally:
+        gc.collect()
+
+
+@router.post("/extract-spec")
+async def extract_spec_pdf(pdf_file: UploadFile = File(...)):
+    """
+    Extract 特記仕様書 items from a PDF and return structured JSON grouped by article.
+    Mirrors the output of running final_extractor.py on '03_特記仕様書 (1).pdf'.
+    """
+    logger.info("=== STARTING SPEC PDF EXTRACTION ===")
+    if not pdf_file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="PDF file required")
+
+    pdf_fd = None
+    pdf_path = None
+    try:
+        pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='spec_')
+        content = await pdf_file.read()
+        with os.fdopen(pdf_fd, 'wb') as f:
+            f.write(content)
+        pdf_fd = None
+
+        extractor = SpecFinalExtractor(pdf_path)
+        extracted = extractor.extract_all()
+
+        # Format as list of {section, data}
+        response = [
+            {"section": section, "data": data} for section, data in extracted
+        ]
+        logger.info("=== SPEC EXTRACTION COMPLETED ===")
+        return {"sections": response, "filename": pdf_file.filename}
+    except Exception as e:
+        logger.error(f"Spec extraction error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Spec extraction error: {str(e)}")
+    finally:
+        try:
+            if pdf_fd is not None:
+                os.close(pdf_fd)
+        except Exception:
+            pass
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.unlink(pdf_path)
+            except Exception:
+                pass
         gc.collect()
 
 
