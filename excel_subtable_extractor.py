@@ -8,48 +8,10 @@ import pandas as pd
 import re
 from typing import List, Dict, Tuple, Optional
 import logging
-from table_title_extractor import extract_excel_table_title_items, find_excel_table_end
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def load_pdf_titles_from_file(file_path: str = "all_titles_with_pdf_reference.txt") -> Dict[str, str]:
-    """
-    Load PDF titles from the reference file.
-
-    Args:
-        file_path: Path to the file containing PDF titles
-
-    Returns:
-        Dictionary mapping reference numbers to PDF titles
-    """
-    pdf_titles = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        for line in lines:
-            if ':' in line and '(' in line and 'PDF:' in line:
-                # Extract reference number and PDF title
-                parts = line.split(':')
-                if len(parts) >= 3:
-                    ref_part = parts[0].strip()
-                    pdf_part = line.split('PDF:')[1].split(')')[0].strip()
-
-                    # Extract reference number (e.g., "単1号" from "単1号: ...")
-                    ref_match = re.search(r'([内外単]\d+号)', ref_part)
-                    if ref_match:
-                        ref_num = ref_match.group(1)
-                        pdf_titles[ref_num] = pdf_part
-
-        logger.info(f"Loaded {len(pdf_titles)} PDF titles")
-        return pdf_titles
-
-    except Exception as e:
-        logger.warning(f"Could not load PDF titles: {e}")
-        return {}
 
 
 def normalize_text(text: str) -> str:
@@ -91,39 +53,6 @@ def find_reference_number_pattern(text: str) -> bool:
     return bool(re.search(pattern, normalized))
 
 
-def find_reference_with_title(df: pd.DataFrame, ref_num: str) -> Optional[int]:
-    """
-    Find the reference number that corresponds to a table title.
-    This handles cases where there might be multiple references but only one has a proper title.
-    """
-    ref_rows = []
-
-    # Find all occurrences of the reference number
-    for idx, row in df.iterrows():
-        if any(str(cell).strip() == ref_num for cell in row if pd.notna(cell)):
-            ref_rows.append(idx)
-
-    if not ref_rows:
-        return None
-
-    # If only one reference, return it
-    if len(ref_rows) == 1:
-        return ref_rows[0]
-
-    # If multiple references, find the one that has a meaningful title
-    for ref_row in ref_rows:
-        # Check if there's a title near this reference
-        title = extract_excel_table_title_items(df, ref_row, ref_row + 1)
-        if title and title.get("item_name"):
-            title_text = title.get("item_name", "")
-            # Check if the title is meaningful (not empty, not just numbers, etc.)
-            if len(title_text.strip()) > 5 and not title_text.strip().isdigit():
-                return ref_row
-
-    # If no meaningful title found, return the first occurrence
-    return ref_rows[0]
-
-
 def find_column_headers_and_positions(df: pd.DataFrame, start_row: int) -> Tuple[Optional[int], Dict[str, int]]:
     """
     Find the column header row and return exact column positions
@@ -163,7 +92,7 @@ def find_column_headers_and_positions(df: pd.DataFrame, start_row: int) -> Tuple
 
 def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: Dict[str, int], reference_number: str) -> List[Dict[str, str]]:
     """
-    Extract data rows from subtable until reaching table end, '計' marker, or next reference number
+    Extract data rows from subtable until reaching '計' marker or next reference number
     """
     data_rows = []
     current_row = header_row + 1
@@ -179,7 +108,6 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
     notes_col = column_positions.get('摘要', 8)
 
     while current_row < len(df):
-
         row_data = df.iloc[current_row].fillna('')
 
         # Check if we've reached the end marker '計'
@@ -314,50 +242,6 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
     return data_rows
 
 
-def extract_unit_value(cell_text: str) -> str:
-    """
-    Extract unit value from cell text that contains "単位".
-    Returns everything after "単位" until the next meaningful separator.
-    """
-    if not cell_text or "単位" not in cell_text:
-        return ""
-
-    # Find the position of "単位"
-    unit_pos = cell_text.find("単位")
-    if unit_pos == -1:
-        return ""
-
-    # Extract everything after "単位"
-    after_unit = cell_text[unit_pos + 2:].strip()
-
-    # Clean up the unit value - remove extra spaces and common separators
-    unit_value = after_unit.split()[0] if after_unit else ""
-
-    return unit_value
-
-
-def extract_unit_quantity_value(cell_text: str) -> str:
-    """
-    Extract unit quantity value from cell text that contains "単位数量".
-    Returns everything after "単位数量" until the next meaningful separator.
-    """
-    if not cell_text or "単位数量" not in cell_text:
-        return ""
-
-    # Find the position of "単位数量"
-    unit_qty_pos = cell_text.find("単位数量")
-    if unit_qty_pos == -1:
-        return ""
-
-    # Extract everything after "単位数量"
-    after_unit_qty = cell_text[unit_qty_pos + 4:].strip()
-
-    # Clean up the quantity value - remove extra spaces and common separators
-    quantity_value = after_unit_qty.split()[0] if after_unit_qty else ""
-
-    return quantity_value
-
-
 def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) -> List[Dict]:
     """
     Main API function to extract subtables from a specific Excel sheet
@@ -380,9 +264,6 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
         logger.info(
             f"Successfully loaded sheet '{sheet_name}' with {len(df)} rows and {len(df.columns)} columns")
 
-        # Load PDF titles for better matching
-        pdf_titles = load_pdf_titles_from_file()
-
         subtables = []
         current_row = 0
 
@@ -403,13 +284,6 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                         df, current_row + 1)
 
                     if header_row is not None:
-                        # Get PDF title for this reference number
-                        pdf_title = pdf_titles.get(reference_number, "")
-
-                        # Extract table title with PDF title for better matching
-                        table_title = extract_excel_table_title_items(
-                            df, current_row, header_row, pdf_title)
-
                         # Extract data rows
                         data_rows = extract_subtable_data(
                             df, header_row, column_positions, reference_number)
@@ -424,13 +298,6 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                                 'data_rows': data_rows,
                                 'total_rows': len(data_rows)
                             }
-
-                            # Add table title if found
-                            if table_title:
-                                subtable['table_title'] = table_title
-                                logger.info(
-                                    f"Extracted table title for {reference_number}: {table_title}")
-
                             subtables.append(subtable)
                             logger.info(
                                 f"Extracted subtable '{reference_number}' with {len(data_rows)} data rows")
@@ -439,7 +306,7 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                                 f"No data rows found for subtable '{reference_number}' - skipping")
 
                         # Move past this subtable to look for the next one
-                        current_row = header_row + 1
+                        current_row = header_row + len(data_rows) + 3
                         break
             else:
                 current_row += 1
@@ -479,8 +346,8 @@ def extract_subtables_from_excel(excel_file_path: str, sheet_name: str = None) -
                     f"Sheet '{sheet_name}' not found in Excel file. Available sheets: {all_sheets}")
             sheets_to_process = [sheet_name]
         else:
-            # Process all sheets (no main sheet to exclude)
-            sheets_to_process = all_sheets
+            # Process all sheets except the first one (main sheet)
+            sheets_to_process = all_sheets[1:]
 
         all_subtables = []
 

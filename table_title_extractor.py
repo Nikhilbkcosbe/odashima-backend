@@ -114,7 +114,7 @@ def extract_pdf_table_title_items(table: List[List[str]], reference_row_idx: int
         return None
 
 
-def extract_excel_table_title_items(df: pd.DataFrame, reference_row: int, header_row: int, pdf_title_item_name: str = None) -> Optional[Dict[str, str]]:
+def extract_excel_table_title_items(df: pd.DataFrame, reference_row: int, header_row: int) -> Optional[Dict[str, str]]:
     """
     Extract table title items from Excel subtable.
 
@@ -122,32 +122,36 @@ def extract_excel_table_title_items(df: pd.DataFrame, reference_row: int, header
         df: DataFrame containing the Excel data
         reference_row: Row index containing the reference number
         header_row: Row index containing the column headers
-        pdf_title_item_name: Optional PDF title item name to use for intelligent selection
 
     Returns:
         Dictionary with item_name, unit, and unit_quantity, or None if no title found
     """
     try:
-        # Find the previous table end (or start of sheet if no previous table)
+        # Find table boundaries
         prev_table_end = find_previous_table_end(df, reference_row)
+        next_table_end = find_excel_table_end(df, reference_row)
 
-        # Collect sentences between previous table end and reference number
-        sentences_before_ref = []
+        # Collect sentences from different areas
+        sentences_before = []
+        sentences_between = []
+        sentences_after_table = []
 
         # Helper function to check if text is meaningful
         def is_meaningful_text(text):
-            if not text or len(text.strip()) < 3:
+            if not text or pd.isna(text):
+                return False
+            text = str(text).strip()
+            if len(text) < 3:
                 return False
             # Check if it contains Japanese characters, numbers, or Latin letters
             return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF0-9A-Za-z]', text))
 
         # Helper function to normalize text for comparison
         def normalize_text(text):
-            if not text:
+            if not text or pd.isna(text):
                 return ""
-            # Convert to string and normalize
             text = str(text).strip()
-            # Convert full-width to half-width
+            # Convert full-width characters to half-width
             full_to_half = str.maketrans(
                 '０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ'
                 'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ　',
@@ -158,62 +162,52 @@ def extract_excel_table_title_items(df: pd.DataFrame, reference_row: int, header
             # Remove spaces for comparison
             return re.sub(r'\s+', '', text)
 
-        # Helper function to extract 1st part of PDF title
-        def extract_first_part_of_pdf_title(pdf_title):
-            if not pdf_title:
-                return ""
-            # Split by common separators and take the first meaningful part
-            parts = re.split(r'[、，\s]+', pdf_title)
-            return parts[0] if parts else ""
+        # Collect sentences before reference number
+        if prev_table_end is not None:
+            for row_idx in range(prev_table_end + 1, reference_row):
+                row_text = " ".join(
+                    [str(cell) for cell in df.iloc[row_idx] if pd.notna(cell) and str(cell).strip()])
+                if is_meaningful_text(row_text):
+                    sentences_before.append(
+                        {'row': row_idx, 'text': row_text.strip()})
 
-        # Helper function to find best matching sentence
-        def find_best_matching_sentence(sentences, pdf_first_part):
-            if not sentences:
-                return None
-            if len(sentences) == 1:
-                return sentences[0]['text']
+        # Collect sentences between reference and table end
+        if next_table_end is not None:
+            for row_idx in range(reference_row + 1, next_table_end):
+                row_text = " ".join(
+                    [str(cell) for cell in df.iloc[row_idx] if pd.notna(cell) and str(cell).strip()])
+                if is_meaningful_text(row_text):
+                    sentences_between.append(
+                        {'row': row_idx, 'text': row_text.strip()})
 
-            # Always select the 2nd sentence from the back (closest to reference number)
-            # If there's only 1 sentence, select that one
-            # If there are 2 or more sentences, select the 2nd from the end
-            if len(sentences) >= 2:
-                selected_sentence = sentences[-2]['text']  # 2nd from the back
-                logger.debug(
-                    f"Selected 2nd sentence from back: '{selected_sentence}'")
-            else:
-                selected_sentence = sentences[0]['text']  # Only 1 sentence
-                logger.debug(f"Selected only sentence: '{selected_sentence}'")
+        # Collect sentences after table number
+        if next_table_end is not None:
+            for row_idx in range(next_table_end + 1, min(next_table_end + 10, len(df))):
+                row_text = " ".join(
+                    [str(cell) for cell in df.iloc[row_idx] if pd.notna(cell) and str(cell).strip()])
+                if is_meaningful_text(row_text):
+                    sentences_after_table.append(
+                        {'row': row_idx, 'text': row_text.strip()})
 
-            return selected_sentence
-
-        # Collect sentences between previous table end and reference number
-        prev_table_end = find_previous_table_end(df, reference_row)
-        start_row = prev_table_end + 1 if prev_table_end is not None else 0
-        logger.debug(
-            f"Collecting sentences from row {start_row} to {reference_row}")
-
-        for row_idx in range(start_row, reference_row):
-            row_text = " ".join(
-                [str(cell) for cell in df.iloc[row_idx] if pd.notna(cell) and str(cell).strip()])
-            if is_meaningful_text(row_text):
-                sentences_before_ref.append(
-                    {'row': row_idx, 'text': row_text.strip()})
-                logger.debug(
-                    f"Added sentence from row {row_idx}: '{row_text.strip()}'")
-
-        logger.debug(
-            f"Collected {len(sentences_before_ref)} sentences: {[s['text'] for s in sentences_before_ref]}")
-
-        # Extract 1st part of PDF title for matching
-        pdf_first_part = extract_first_part_of_pdf_title(pdf_title_item_name)
-
-        # Select title based on PDF title matching
+        # Select title based on priority order
         selected_title = None
 
-        # Try sentences between previous table end and reference number
-        if sentences_before_ref:
-            selected_title = find_best_matching_sentence(
-                sentences_before_ref, pdf_first_part)
+        # Try sentences before reference number first (this is the main area for titles)
+        if sentences_before:
+            # If multiple sentences, prefer the one closest to the reference number
+            if len(sentences_before) >= 2:
+                # 2nd from the back
+                selected_title = sentences_before[-2]['text']
+            else:
+                selected_title = sentences_before[0]['text']
+
+        # If no sentence before, try sentences between reference and table end
+        if not selected_title and sentences_between:
+            selected_title = sentences_between[0]['text']
+
+        # If still no title, try sentences after table number
+        if not selected_title and sentences_after_table:
+            selected_title = sentences_after_table[0]['text']
 
         if selected_title:
             return {
