@@ -6,6 +6,8 @@ from mangum import Mangum
 from server.api.login import router as login_router
 from server.api.projects import router as projects_router
 from server.api.tender import router as tender_router
+from excel_verification_api import excel_verification_router
+
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
@@ -17,7 +19,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://odashimagumi.cosbe.inc",
                    "http://localhost:5173", "https://odashimagumi.cosbe.inc/"],
-    allow_credentials=True, 
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     max_age=3600
@@ -27,6 +29,8 @@ handler = Mangum(app)
 app.include_router(login_router, prefix="/api/v1")
 app.include_router(projects_router, prefix="/api/v1")
 app.include_router(tender_router, prefix="/api/v1/tender")
+app.include_router(excel_verification_router, prefix="/api/v1/excel")
+
 
 if __name__ == "__main__":
     port = int(os.getenv('server_port', 8000))  # Default to 8000 if not set
