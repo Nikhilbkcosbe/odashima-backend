@@ -8,6 +8,7 @@ import pandas as pd
 import re
 from typing import List, Dict, Tuple, Optional
 import logging
+from table_title_extractor import extract_excel_table_title_items, find_excel_table_end
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -276,14 +277,33 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                 # This avoids false positives from reference codes in remarks columns
                 if col_idx <= 3 and find_reference_number_pattern(str(cell_value)):
                     reference_number = str(cell_value).strip()
+                    print(f"DEBUG: Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
                     logger.info(
                         f"Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
 
                     # Find column headers
+                    print(f"DEBUG: About to call find_column_headers_and_positions for {reference_number}")
                     header_row, column_positions = find_column_headers_and_positions(
                         df, current_row + 1)
+                    print(
+                        f"DEBUG: Header row result: {header_row}, column_positions: {column_positions}")
+                    logger.debug(
+                        f"Header row result: {header_row}, column_positions: {column_positions}")
 
                     if header_row is not None:
+                        # Extract table title
+                        print(
+                            f"DEBUG: About to extract title for {reference_number} at row {current_row}")
+                        logger.debug(
+                            f"Attempting to extract title for {reference_number} at row {current_row}")
+                        logger.debug(f"Header row: {header_row}")
+                        table_title = extract_excel_table_title_items(
+                            df, current_row, header_row)
+                        print(
+                            f"DEBUG: Title extraction result for {reference_number}: {table_title}")
+                        logger.debug(
+                            f"Title extraction result for {reference_number}: {table_title}")
+
                         # Extract data rows
                         data_rows = extract_subtable_data(
                             df, header_row, column_positions, reference_number)
@@ -298,6 +318,13 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                                 'data_rows': data_rows,
                                 'total_rows': len(data_rows)
                             }
+
+                            # Add table title if found
+                            if table_title:
+                                subtable['table_title'] = table_title
+                                logger.info(
+                                    f"Extracted table title for {reference_number}: {table_title}")
+
                             subtables.append(subtable)
                             logger.info(
                                 f"Extracted subtable '{reference_number}' with {len(data_rows)} data rows")
@@ -307,6 +334,11 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
 
                         # Move past this subtable to look for the next one
                         current_row = header_row + len(data_rows) + 3
+                        break
+                    else:
+                        print(
+                            f"DEBUG: Header row is None for {reference_number}")
+                        logger.warning(f"Header row is None for {reference_number} - skipping")
                         break
             else:
                 current_row += 1

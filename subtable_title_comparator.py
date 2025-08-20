@@ -128,12 +128,12 @@ def check_unit_quantity_presence_in_excel_title(pdf_unit_quantity: str, excel_ti
 
 
 def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[bool, str]:
-    """Check if PDF data components are present in Excel title using AND operation."""
+    """Check if PDF data components are present in Excel title using FLEXIBLE matching (previous logic)."""
     if not excel_title or not pdf_data:
         return False, "Missing title or data"
 
-    # Normalize both Excel and PDF data to full-width
-    excel_title_normalized = normalize_to_fullwidth(excel_title.lower())
+    # Normalize both Excel and PDF data
+    excel_title_normalized = normalize_text(excel_title.lower())
 
     # Get PDF components from actual extracted data
     pdf_item_name = pdf_data.get('item_name', '')
@@ -141,51 +141,101 @@ def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[b
     pdf_unit_quantity = pdf_data.get('unit_quantity', '')
 
     # Normalize PDF components
-    pdf_item_name_normalized = normalize_to_fullwidth(pdf_item_name.lower())
-    pdf_unit_normalized = normalize_to_fullwidth(pdf_unit.lower())
-    pdf_unit_quantity_normalized = normalize_to_fullwidth(
-        pdf_unit_quantity.lower())
+    pdf_item_name_normalized = normalize_text(pdf_item_name.lower())
+    pdf_unit_normalized = normalize_text(pdf_unit.lower())
+    pdf_unit_quantity_normalized = normalize_text(pdf_unit_quantity.lower())
 
-    # Check item name
+    # FLEXIBLE LOGIC: Check each component anywhere in the Excel title (not position-based)
+
+    # 1. Check item name: 1st or 2nd part of PDF item name anywhere in Excel title
     item_match = False
     if pdf_item_name_normalized:
-        # Split item name and check if any part is in Excel title
-        item_parts = re.split(r'[、，\s]+', pdf_item_name_normalized)
-        for item_part in item_parts:
-            if item_part and item_part in excel_title_normalized:
-                item_match = True
-                break
+        # Split the original PDF item name by spaces (before normalization)
+        original_pdf_item = pdf_data.get('item_name', '')
+        if original_pdf_item:
+            space_parts = original_pdf_item.split()
+            if len(space_parts) >= 2:
+                first_part = normalize_text(
+                    space_parts[0].lower())  # 1st part (e.g., "下塗")
+                # 2nd part (e.g., "塗装種別:...")
+                second_part = normalize_text(space_parts[1].lower())
+
+                # Check if 1st part is in Excel title
+                if first_part and first_part in excel_title_normalized:
+                    item_match = True
+                # Check if 2nd part is in Excel title
+                elif second_part and second_part in excel_title_normalized:
+                    item_match = True
+                # If no exact match, try partial matching for 1st part
+                elif first_part and len(first_part) >= 3:
+                    for length in range(min(len(first_part), 6), 2, -1):
+                        prefix = first_part[:length]
+                        if prefix in excel_title_normalized:
+                            item_match = True
+                            break
+            else:
+                # If only one part, check that part
+                single_part = normalize_text(
+                    space_parts[0].lower()) if space_parts else ""
+                if single_part and single_part in excel_title_normalized:
+                    item_match = True
+                elif single_part and len(single_part) >= 3:
+                    for length in range(min(len(single_part), 6), 2, -1):
+                        prefix = single_part[:length]
+                        if prefix in excel_title_normalized:
+                            item_match = True
+                            break
     else:
         item_match = True  # If no item name in PDF, consider it a match
 
-    # Check unit
+    # 2. Check unit: PDF unit MUST be present in Excel title string
     unit_match = False
-    if pdf_unit_normalized and pdf_unit_normalized in excel_title_normalized:
-        unit_match = True
-    elif not pdf_unit_normalized:  # If no unit in PDF, consider it a match
-        unit_match = True
+    if pdf_unit_normalized:
+        # PDF unit MUST be found in Excel title string
+        if pdf_unit_normalized in excel_title_normalized:
+            unit_match = True
+        else:
+            unit_match = False  # If PDF has unit but Excel title doesn't contain it, it's a mismatch
+    else:
+        unit_match = True  # If no unit in PDF, consider it a match
 
-    # Check unit quantity
+    # 3. Check unit quantity: PDF unit quantity MUST be present in Excel title string
     quantity_match = False
     if pdf_unit_quantity_normalized:
-        # Extract just the number part for comparison
-        number_match = re.search(r'\d+', pdf_unit_quantity_normalized)
-        if number_match:
-            number = number_match.group(0)
-            if number in excel_title_normalized:
-                quantity_match = True
+        if pdf_unit_quantity_normalized in excel_title_normalized:
+            quantity_match = True
         else:
-            quantity_match = True  # If no number in unit quantity, consider it a match
-    else:  # If no quantity in PDF, consider it a match
-        quantity_match = True
-
-    # Determine overall match using AND operation
-    if item_match and unit_match and quantity_match:
-        return True, "Full match (AND)"
-    elif item_match:
-        return False, "Item match only (missing unit/quantity)"
+            # Try without commas (e.g., "1,000" vs "1000")
+            qty_without_comma = pdf_unit_quantity_normalized.replace(',', '')
+            if qty_without_comma in excel_title_normalized:
+                quantity_match = True
+            else:
+                # Try with comma (e.g., "1000" vs "1,000")
+                qty_with_comma = pdf_unit_quantity_normalized
+                if ',' not in qty_with_comma and len(qty_with_comma) >= 4:
+                    # Add comma for thousands
+                    qty_with_comma = qty_with_comma[:-
+                                                    3] + ',' + qty_with_comma[-3:]
+                    if qty_with_comma in excel_title_normalized:
+                        quantity_match = True
+                else:
+                    # If PDF has quantity but Excel title doesn't contain it, it's a mismatch
+                    quantity_match = False
     else:
-        return False, "No match"
+        quantity_match = True  # If no quantity in PDF, consider it a match
+
+    # UNIT & QUANTITY ONLY: Only check unit and unit quantity
+    # Both unit and quantity must match
+    if unit_match and quantity_match:
+        return True, "Unit + Quantity match"
+    else:
+        # Check which conditions failed
+        missing = []
+        if not unit_match:
+            missing.append("unit")
+        if not quantity_match:
+            missing.append("quantity")
+        return False, f"No match - missing: {', '.join(missing)}"
 
 
 def compare_subtable_titles(pdf_subtable, excel_subtable) -> Dict:
@@ -288,8 +338,10 @@ def compare_all_subtable_titles(pdf_path: str, excel_path: str, pdf_start_page: 
             f"Found {len(pdf_subtables)} PDF subtables and {len(excel_subtables)} Excel subtables")
 
         # Create reference number mappings
-        pdf_by_ref = {subtable["reference_number"]: subtable for subtable in pdf_subtables if "table_title" in subtable}
-        excel_by_ref = {subtable["reference_number"]: subtable for subtable in excel_subtables if "table_title" in subtable}
+        pdf_by_ref = {subtable["reference_number"]
+            : subtable for subtable in pdf_subtables if "table_title" in subtable}
+        excel_by_ref = {subtable["reference_number"]
+            : subtable for subtable in excel_subtables if "table_title" in subtable}
 
         logger.info(f"PDF subtables with titles: {len(pdf_by_ref)}")
         logger.info(f"Excel subtables with titles: {len(excel_by_ref)}")
