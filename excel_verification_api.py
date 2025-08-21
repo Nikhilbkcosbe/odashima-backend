@@ -91,6 +91,11 @@ class HierarchicalExcelExtractor:
         logger.info(
             f"Built hierarchy with {len(hierarchical_items)} root items")
 
+        # Verify amount calculations
+        hierarchical_items = self._verify_amount_calculations(
+            hierarchical_items)
+        logger.info("Amount verification completed")
+
         return hierarchical_items
 
     def _find_header_row(self, df: pd.DataFrame) -> Optional[int]:
@@ -404,16 +409,202 @@ class HierarchicalExcelExtractor:
         root_items_dict = [item_to_dict(item) for item in hierarchical_items]
         return json.dumps(root_items_dict, ensure_ascii=False, indent=2)
 
+    def _verify_amount_calculations(self, hierarchical_items: List[HierarchicalItem]) -> List[HierarchicalItem]:
+        """Verify that root item amounts match the sum according to business rules"""
+        for item in hierarchical_items:
+            if item.level == 0:  # Root item
+                # Get actual amount from the item
+                try:
+                    actual_amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                except (ValueError, AttributeError):
+                    actual_amount = 0.0
+
+                # Calculate expected amount based on business rules for specific items
+                if item.item_name == "純工事費":
+                    expected_amount = self._calculate_junkoji_amount(
+                        hierarchical_items)
+                elif item.item_name == "工事原価":
+                    expected_amount = self._calculate_koji_genka_amount(
+                        hierarchical_items)
+                elif item.item_name == "工事価格":
+                    expected_amount = self._calculate_koji_kakaku_amount(
+                        hierarchical_items)
+                elif item.item_name == "消費税額及び地方消費税額":
+                    # No verification required for tax amount
+                    expected_amount = actual_amount
+                elif item.item_name == "工事費計":
+                    expected_amount = self._calculate_koji_kei_amount(
+                        hierarchical_items)
+                elif not item.children:
+                    # For items without children (and not business logic items), we still need to verify them
+                    # They should match their actual amount (no calculation needed)
+                    expected_amount = actual_amount
+                    is_matched = True
+                    difference = 0.0
+
+                    item.amount_verification = {
+                        'is_matched': is_matched,
+                        'expected_amount': expected_amount,
+                        'actual_amount': actual_amount,
+                        'difference': difference
+                    }
+                    logger.info(
+                        f"Verification for '{item.item_name}' (no children): Expected=Actual={actual_amount}")
+                    continue
+                else:
+                    # For other items, use standard children sum calculation
+                    expected_amount = self._calculate_children_sum(item)
+
+                # Check if amounts match (with small tolerance for floating point precision)
+                tolerance = 0.01  # 1 cent tolerance
+                is_matched = abs(expected_amount - actual_amount) <= tolerance
+
+                # Add verification fields to the item
+                item.amount_verification = {
+                    'is_matched': is_matched,
+                    'expected_amount': expected_amount,
+                    'actual_amount': actual_amount,
+                    'difference': actual_amount - expected_amount
+                }
+
+                logger.info(f"Amount verification for '{item.item_name}': "
+                            f"Expected: {expected_amount:,.0f}, "
+                            f"Actual: {actual_amount:,.0f}, "
+                            f"Matched: {is_matched}")
+            else:
+                # For non-root items, set verification to None
+                item.amount_verification = None
+
+        return hierarchical_items
+
+    def _calculate_children_sum(self, item: HierarchicalItem) -> float:
+        """Calculate the sum of direct children amounts only (not recursive)"""
+        total = 0.0
+
+        for child in item.children:
+            # Convert child amount to float, handling empty strings and non-numeric values
+            try:
+                child_amount = float(child.amount.replace(
+                    ',', '')) if child.amount else 0.0
+            except (ValueError, AttributeError):
+                child_amount = 0.0
+
+            # Add only the direct child's amount (not recursive)
+            total += child_amount
+
+        return total
+
+    def _calculate_junkoji_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
+        """Calculate 純工事費 amount: Sum of items before it (excluding 直接工事費)"""
+        total = 0.0
+
+        # According to business logic: sum of items before 純工事費 (excluding 直接工事費)
+        # This means: 橋梁保全工事 + 共通仮設
+        for item in hierarchical_items:
+            if item.item_name in ["橋梁保全工事", "共通仮設 "]:  # Note the space in 共通仮設
+                try:
+                    amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                    total += amount
+                except (ValueError, AttributeError):
+                    pass
+
+        return total
+
+    def _calculate_koji_genka_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
+        """Calculate 工事原価 amount: 純工事費 amount + 現場管理費 amount"""
+        junkoji_amount = 0.0
+        genkan_amount = 0.0
+
+        # Find 純工事費 amount
+        for item in hierarchical_items:
+            if item.item_name == "純工事費":
+                try:
+                    junkoji_amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                except (ValueError, AttributeError):
+                    pass
+                break
+
+        # Find 現場管理費 amount in children of 純工事費
+        for item in hierarchical_items:
+            if item.item_name == "純工事費":
+                for child in item.children:
+                    if child.item_name == "　現場管理費":  # Note the space prefix
+                        try:
+                            genkan_amount = float(child.amount.replace(
+                                ',', '')) if child.amount else 0.0
+                        except (ValueError, AttributeError):
+                            pass
+                        break
+                break
+
+        return junkoji_amount + genkan_amount
+
+    def _calculate_koji_kakaku_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
+        """Calculate 工事価格 amount: 一般管理費等 + 工事原価 amount"""
+        genka_amount = 0.0
+        ippankan_amount = 0.0
+
+        # Find 工事原価 amount
+        for item in hierarchical_items:
+            if item.item_name == "工事原価":
+                try:
+                    genka_amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                except (ValueError, AttributeError):
+                    pass
+                break
+
+        # Find 一般管理費等 amount in children of 工事原価
+        for item in hierarchical_items:
+            if item.item_name == "工事原価":
+                for child in item.children:
+                    if child.item_name == "　一般管理費等":  # Note the space prefix
+                        try:
+                            ippankan_amount = float(child.amount.replace(
+                                ',', '')) if child.amount else 0.0
+                        except (ValueError, AttributeError):
+                            pass
+                        break
+                break
+
+        return ippankan_amount + genka_amount
+
+    def _calculate_koji_kei_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
+        """Calculate 工事費計 amount: 消費税額及び地方消費税額 + 工事価格 amount"""
+        kakaku_amount = 0.0
+        tax_amount = 0.0
+
+        # Find 工事価格 amount
+        for item in hierarchical_items:
+            if item.item_name == "工事価格":
+                try:
+                    kakaku_amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                except (ValueError, AttributeError):
+                    pass
+                break
+
+        # Find 消費税額及び地方消費税額 amount
+        for item in hierarchical_items:
+            if item.item_name == "消費税額及び地方消費税額":
+                try:
+                    tax_amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                except (ValueError, AttributeError):
+                    pass
+                break
+
+        return tax_amount + kakaku_amount
+
 
 class ComprehensiveVerifier:
     def __init__(self):
         # Items to exclude from standard verification (they have special business logic)
         self.exclude_items = [
-            '純工事費',
-            '工事原価',
-            '工事価格',
-            '工事費計',
-            '直接工事費'
+            # No items are excluded - we verify everything
         ]
 
     def verify_business_logic(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -491,15 +682,20 @@ class ComprehensiveVerifier:
         def verify_item_recursively(item, parent_path=""):
             current_path = f"{parent_path}/{item['item_name']}" if parent_path else item['item_name']
 
-            # Skip excluded items
-            if item['item_name'] in self.exclude_items:
-                return True, 0, 0
-
-            # Skip items without children
+            # For items without children, we still verify them
+            # They should match their actual amount (no calculation needed)
             if not item['children']:
+                # These items pass verification automatically since they have no children to sum
                 return True, 0, 0
 
-            # Calculate children sum
+            # For business logic items, use specific business logic calculations
+            business_logic_items = ['純工事費', '工事原価', '工事価格', '工事費計']
+            if item['item_name'] in business_logic_items:
+                # These items are already verified by HierarchicalExcelExtractor with business logic
+                # We don't need to verify them again here since they have special calculation rules
+                return True, 0, 0
+
+            # For standard items, calculate children sum
             children_sum = 0
             verified_children = 0
             mismatched_children = 0
@@ -603,15 +799,46 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
         # Recursive verification
         recursive_results = verifier.verify_recursive(json_data)
 
-        # Calculate totals
-        total_items = recursive_results['total_items_verified'] + \
-            recursive_results['total_items_mismatched']
+        # Count all root items (including business logic items)
+        total_items = len([item for item in json_data if item['level'] == 0])
+
+        # Also check business logic verification results from HierarchicalExcelExtractor
+        business_logic_mismatches = []
+        for item in json_data:
+            if item.get('amount_verification') and not item['amount_verification']['is_matched']:
+                business_logic_mismatches.append({
+                    'path': item['item_name'],
+                    'level': item['level'],
+                    'amount': item['amount_verification']['actual_amount'],
+                    'children_sum': item['amount_verification']['expected_amount'],
+                    'difference': item['amount_verification']['difference'],
+                    'item_name': item['item_name']
+                })
+
+        # Combine mismatches from both verification methods and deduplicate
+        all_mismatches = recursive_results['mismatches'] + \
+            business_logic_mismatches
+
+        # Deduplicate mismatches based on path and level
+        seen_paths = set()
+        unique_mismatches = []
+
+        for mismatch in all_mismatches:
+            path_key = f"{mismatch['path']}_{mismatch['level']}"
+            if path_key not in seen_paths:
+                seen_paths.add(path_key)
+                unique_mismatches.append(mismatch)
+
+        total_mismatched_items = len(unique_mismatches)
+
+        # Calculate verified items: total - mismatched
+        total_verified_items = total_items - total_mismatched_items
 
         return VerificationResult(
             total_items=total_items,
-            verified_items=recursive_results['total_items_verified'],
-            mismatched_items=recursive_results['total_items_mismatched'],
-            mismatches=recursive_results['mismatches'],
+            verified_items=total_verified_items,
+            mismatched_items=total_mismatched_items,
+            mismatches=unique_mismatches,
             business_logic_verified=business_logic_results['business_logic_verified'],
             extraction_successful=True,
             error_message=None

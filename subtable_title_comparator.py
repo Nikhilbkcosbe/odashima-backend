@@ -116,7 +116,8 @@ def check_unit_presence_in_excel_title(pdf_unit: str, excel_title: str) -> bool:
 
 def check_unit_quantity_presence_in_excel_title(pdf_unit_quantity: str, excel_title: str) -> bool:
     """
-    Check if PDF unit quantity is present anywhere in Excel title string.
+    Check if PDF unit quantity is present in Excel title string with stricter matching.
+    Now checks for adjacent unit quantity + unit patterns (e.g., "10m2", "10m") rather than just substring matching.
     """
     if not pdf_unit_quantity or not excel_title:
         return False
@@ -124,11 +125,76 @@ def check_unit_quantity_presence_in_excel_title(pdf_unit_quantity: str, excel_ti
     normalized_pdf_qty = normalize_text(pdf_unit_quantity)
     normalized_excel_title = normalize_text(excel_title)
 
-    return normalized_pdf_qty in normalized_excel_title
+    # First, try exact substring match (original logic)
+    if normalized_pdf_qty in normalized_excel_title:
+        return True
+
+    # If exact match fails, try with comma variations
+    qty_without_comma = normalized_pdf_qty.replace(',', '')
+    if qty_without_comma in normalized_excel_title:
+        return True
+
+    # Try with comma (e.g., "1000" vs "1,000")
+    qty_with_comma = normalized_pdf_qty
+    if ',' not in qty_with_comma and len(qty_with_comma) >= 4:
+        # Add comma for thousands
+        qty_with_comma = qty_with_comma[:-3] + ',' + qty_with_comma[-3:]
+        if qty_with_comma in normalized_excel_title:
+            return True
+
+    return False
+
+
+def check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity: str, pdf_unit: str, excel_title: str) -> bool:
+    """
+    Check if PDF unit quantity and unit appear adjacent to each other in Excel title.
+    This is a stricter check that looks for patterns like "10m2", "10m", "5本", etc.
+    Uses word boundary matching to prevent substring issues like "5本" matching "15本".
+    """
+    if not pdf_unit_quantity or not pdf_unit or not excel_title:
+        return False
+
+    normalized_pdf_qty = normalize_text(pdf_unit_quantity)
+    normalized_pdf_unit = normalize_text(pdf_unit)
+    normalized_excel_title = normalize_text(excel_title)
+
+    # Create the adjacent pattern: quantity + unit
+    adjacent_pattern = normalized_pdf_qty + normalized_pdf_unit
+
+    # Use regex with word boundaries to prevent substring matching
+    # This ensures "5本" doesn't match "15本"
+    import re
+
+    # Create a regex pattern that matches the quantity+unit as a complete word
+    # The pattern should be preceded by a non-digit and followed by a non-digit or end of string
+    regex_pattern = r'(?<!\d)' + re.escape(adjacent_pattern) + r'(?!\d)'
+
+    if re.search(regex_pattern, normalized_excel_title):
+        return True
+
+    # Try with comma variations for quantity
+    qty_without_comma = normalized_pdf_qty.replace(',', '')
+    adjacent_pattern_no_comma = qty_without_comma + normalized_pdf_unit
+    regex_pattern_no_comma = r'(?<!\d)' + \
+        re.escape(adjacent_pattern_no_comma) + r'(?!\d)'
+    if re.search(regex_pattern_no_comma, normalized_excel_title):
+        return True
+
+    # Try with comma for thousands
+    if ',' not in normalized_pdf_qty and len(normalized_pdf_qty) >= 4:
+        qty_with_comma = normalized_pdf_qty[:-
+                                            3] + ',' + normalized_pdf_qty[-3:]
+        adjacent_pattern_with_comma = qty_with_comma + normalized_pdf_unit
+        regex_pattern_with_comma = r'(?<!\d)' + \
+            re.escape(adjacent_pattern_with_comma) + r'(?!\d)'
+        if re.search(regex_pattern_with_comma, normalized_excel_title):
+            return True
+
+    return False
 
 
 def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[bool, str]:
-    """Check if PDF data components are present in Excel title using FLEXIBLE matching (previous logic)."""
+    """Check if PDF data components are present in Excel title using STRICT adjacent matching for unit+quantity."""
     if not excel_title or not pdf_data:
         return False, "Missing title or data"
 
@@ -145,7 +211,7 @@ def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[b
     pdf_unit_normalized = normalize_text(pdf_unit.lower())
     pdf_unit_quantity_normalized = normalize_text(pdf_unit_quantity.lower())
 
-    # FLEXIBLE LOGIC: Check each component anywhere in the Excel title (not position-based)
+    # STRICT LOGIC: Check each component with stricter matching
 
     # 1. Check item name: 1st or 2nd part of PDF item name anywhere in Excel title
     item_match = False
@@ -199,28 +265,21 @@ def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[b
     else:
         unit_match = True  # If no unit in PDF, consider it a match
 
-    # 3. Check unit quantity: PDF unit quantity MUST be present in Excel title string
+    # 3. Check unit quantity: Use STRICT adjacent pattern matching
     quantity_match = False
-    if pdf_unit_quantity_normalized:
-        if pdf_unit_quantity_normalized in excel_title_normalized:
+    if pdf_unit_quantity_normalized and pdf_unit_normalized:
+        # Use the new strict adjacent pattern matching
+        if check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity_normalized, pdf_unit_normalized, excel_title_normalized):
             quantity_match = True
         else:
-            # Try without commas (e.g., "1,000" vs "1000")
-            qty_without_comma = pdf_unit_quantity_normalized.replace(',', '')
-            if qty_without_comma in excel_title_normalized:
-                quantity_match = True
-            else:
-                # Try with comma (e.g., "1000" vs "1,000")
-                qty_with_comma = pdf_unit_quantity_normalized
-                if ',' not in qty_with_comma and len(qty_with_comma) >= 4:
-                    # Add comma for thousands
-                    qty_with_comma = qty_with_comma[:-
-                                                    3] + ',' + qty_with_comma[-3:]
-                    if qty_with_comma in excel_title_normalized:
-                        quantity_match = True
-                else:
-                    # If PDF has quantity but Excel title doesn't contain it, it's a mismatch
-                    quantity_match = False
+            # No fallback to flexible matching - if adjacent pattern doesn't match, it's a mismatch
+            quantity_match = False
+    elif pdf_unit_quantity_normalized:
+        # If we have quantity but no unit, use the original flexible matching
+        if check_unit_quantity_presence_in_excel_title(pdf_unit_quantity_normalized, excel_title_normalized):
+            quantity_match = True
+        else:
+            quantity_match = False
     else:
         quantity_match = True  # If no quantity in PDF, consider it a match
 
