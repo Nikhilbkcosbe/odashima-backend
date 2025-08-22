@@ -436,6 +436,9 @@ class HierarchicalExcelExtractor:
                 elif item.item_name == "工事費計":
                     expected_amount = self._calculate_koji_kei_amount(
                         hierarchical_items)
+                elif item.item_name == "直接工事費":
+                    expected_amount = self._calculate_chokkoji_amount(
+                        hierarchical_items)
                 elif not item.children:
                     # For items without children (and not business logic items), we still need to verify them
                     # They should match their actual amount (no calculation needed)
@@ -599,6 +602,35 @@ class HierarchicalExcelExtractor:
 
         return tax_amount + kakaku_amount
 
+    def _calculate_chokkoji_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
+        """Calculate 直接工事費 amount: Sum of all Level 0 items that come before it"""
+        total = 0.0
+
+        # Find the position of 直接工事費 to determine which items come before it
+        chokkoji_index = -1
+
+        # Find the position of 直接工事費
+        for i, item in enumerate(hierarchical_items):
+            if item.level == 0 and item.item_name == "直接工事費":
+                chokkoji_index = i
+                break
+
+        # If 直接工事費 is not found, return 0
+        if chokkoji_index == -1:
+            return 0.0
+
+        # Sum all Level 0 items that come before 直接工事費
+        for i, item in enumerate(hierarchical_items):
+            if item.level == 0 and i < chokkoji_index:  # Only Level 0 items before 直接工事費
+                try:
+                    amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                    total += amount
+                except (ValueError, AttributeError):
+                    pass
+
+        return total
+
 
 class ComprehensiveVerifier:
     def __init__(self):
@@ -620,7 +652,9 @@ class ComprehensiveVerifier:
         koji_genka = None
         koji_kakaku = None
         kojihikei = None
+        chokkoji_fee = None
         items_before_junkoji = []
+        items_before_chokkoji = []
 
         for item in data:
             if item['item_name'] == '純工事費':
@@ -631,6 +665,8 @@ class ComprehensiveVerifier:
                 koji_kakaku = item
             elif item['item_name'] == '工事費計':
                 kojihikei = item
+            elif item['item_name'] == '直接工事費':
+                chokkoji_fee = item
             elif item['level'] == 0 and item['item_name'] not in ['純工事費', '直接工事費']:
                 items_before_junkoji.append(item)
 
@@ -651,6 +687,42 @@ class ComprehensiveVerifier:
             if not is_matched:
                 results['business_logic_verified'] = False
                 results['business_logic_mismatches'].append('純工事費')
+
+        # Verify 直接工事費
+        if chokkoji_fee:
+            # Find the position of 直接工事費
+            chokkoji_index = -1
+            for i, item in enumerate(data):
+                if item['level'] == 0 and item['item_name'] == '直接工事費':
+                    chokkoji_index = i
+                    break
+
+            # Calculate sum of Level 0 items before 直接工事費
+            expected_amount = 0.0
+            if chokkoji_index != -1:
+                for i, item in enumerate(data):
+                    # Only Level 0 items before 直接工事費
+                    if item['level'] == 0 and i < chokkoji_index:
+                        try:
+                            amount = float(
+                                item['amount']) if item['amount'] else 0.0
+                            expected_amount += amount
+                        except (ValueError, AttributeError):
+                            pass
+
+            actual_amount = float(chokkoji_fee['amount'])
+            tolerance = 0.01
+            is_matched = abs(actual_amount - expected_amount) <= tolerance
+
+            results['business_logic_details']['直接工事費'] = {
+                'expected': expected_amount,
+                'actual': actual_amount,
+                'matched': is_matched
+            }
+
+            if not is_matched:
+                results['business_logic_verified'] = False
+                results['business_logic_mismatches'].append('直接工事費')
 
         # Verify 工事原価
         if koji_genka and junkoji_fee:
@@ -689,7 +761,7 @@ class ComprehensiveVerifier:
                 return True, 0, 0
 
             # For business logic items, use specific business logic calculations
-            business_logic_items = ['純工事費', '工事原価', '工事価格', '工事費計']
+            business_logic_items = ['純工事費', '工事原価', '工事価格', '工事費計', '直接工事費']
             if item['item_name'] in business_logic_items:
                 # These items are already verified by HierarchicalExcelExtractor with business logic
                 # We don't need to verify them again here since they have special calculation rules
