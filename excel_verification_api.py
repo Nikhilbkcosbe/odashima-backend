@@ -499,13 +499,37 @@ class HierarchicalExcelExtractor:
         return total
 
     def _calculate_junkoji_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
-        """Calculate 純工事費 amount: Sum of items before it (excluding 直接工事費)"""
+        """Calculate 純工事費 amount: 直接工事費 + sum of Level 0 items before 純工事費 (excluding 直接工事費)"""
         total = 0.0
 
-        # According to business logic: sum of items before 純工事費 (excluding 直接工事費)
-        # This means: 橋梁保全工事 + 共通仮設
+        # Find 直接工事費 amount
+        chokkoji_amount = 0.0
         for item in hierarchical_items:
-            if item.item_name in ["橋梁保全工事", "共通仮設 "]:  # Note the space in 共通仮設
+            if item.item_name == "直接工事費":
+                try:
+                    chokkoji_amount = float(item.amount.replace(
+                        ',', '')) if item.amount else 0.0
+                except (ValueError, AttributeError):
+                    pass
+                break
+
+        # Start with 直接工事費 amount
+        total = chokkoji_amount
+
+        # Find the position of 純工事費 to determine which items come before it
+        junkoji_index = -1
+        for i, item in enumerate(hierarchical_items):
+            if item.level == 0 and item.item_name == "純工事費":
+                junkoji_index = i
+                break
+
+        # If 純工事費 is not found, return just 直接工事費 amount
+        if junkoji_index == -1:
+            return total
+
+        # Add sum of all Level 0 items that come before 純工事費 (excluding 直接工事費 to avoid double counting)
+        for i, item in enumerate(hierarchical_items):
+            if item.level == 0 and i < junkoji_index and item.item_name != "直接工事費":
                 try:
                     amount = float(item.amount.replace(
                         ',', '')) if item.amount else 0.0
@@ -672,8 +696,36 @@ class ComprehensiveVerifier:
 
         # Verify 純工事費
         if junkoji_fee:
-            expected_amount = sum(float(item['amount']) for item in items_before_junkoji
-                                  if item['item_name'] not in ['工事価格', '消費税額及び地方消費税額', '工事費計'])
+            # Find 直接工事費 amount
+            chokkoji_amount = 0.0
+            for item in data:
+                if item['item_name'] == '直接工事費':
+                    try:
+                        chokkoji_amount = float(
+                            item['amount']) if item['amount'] else 0.0
+                    except (ValueError, AttributeError):
+                        pass
+                    break
+
+            # Find the position of 純工事費 to determine which items come before it
+            junkoji_index = -1
+            for i, item in enumerate(data):
+                if item['level'] == 0 and item['item_name'] == '純工事費':
+                    junkoji_index = i
+                    break
+
+            # Calculate expected amount: 直接工事費 + sum of Level 0 items before 純工事費 (excluding 直接工事費)
+            expected_amount = chokkoji_amount
+            if junkoji_index != -1:
+                for i, item in enumerate(data):
+                    if item['level'] == 0 and i < junkoji_index and item['item_name'] != '直接工事費':
+                        try:
+                            amount = float(
+                                item['amount']) if item['amount'] else 0.0
+                            expected_amount += amount
+                        except (ValueError, AttributeError):
+                            pass
+
             actual_amount = float(junkoji_fee['amount'])
             tolerance = 0.01
             is_matched = abs(actual_amount - expected_amount) <= tolerance
