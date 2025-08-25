@@ -1,23 +1,23 @@
+from ..services.estimate_extractor import EstimateReferenceExtractor
+from ..services.spec_extractor import SpecFinalExtractor
+from ..services.extraction_cache_service import get_extraction_cache
+from ..services.normalizer import Normalizer
+from ..services.excel_table_extractor_service import ExcelTableExtractorService
+from ..services.matcher import Matcher
+from ..services.excel_parser import ExcelParser
+from ..services.pdf_parser import PDFParser
+from ..schemas.tender import ComparisonSummary, SubtableComparisonSummary
+from io import BytesIO
+import time
+import logging
+import gc
+import tempfile
+from typing import List, Optional, Dict
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from subtable_title_comparator import compare_all_subtable_titles, compare_all_subtable_titles_from_cached_data
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-from subtable_title_comparator import compare_all_subtable_titles, compare_all_subtable_titles_from_cached_data
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from typing import List, Optional, Dict
-import tempfile
-import os
-import gc
-import logging
-import time
-from io import BytesIO
-from ..schemas.tender import ComparisonSummary, SubtableComparisonSummary
-from ..services.pdf_parser import PDFParser
-from ..services.excel_parser import ExcelParser
-from ..services.matcher import Matcher
-from ..services.excel_table_extractor_service import ExcelTableExtractorService
-from ..services.normalizer import Normalizer
-from ..services.extraction_cache_service import get_extraction_cache
-from ..services.spec_extractor import SpecFinalExtractor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -134,48 +134,131 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
 
 
 @router.post("/extract-spec")
-async def extract_spec_pdf(pdf_file: UploadFile = File(...)):
+async def extract_spec_pdf(
+    spec_pdf_file: UploadFile = File(...),
+    estimate_pdf_file: UploadFile = File(...),
+    estimate_page_number: str = Form(...)
+):
     """
-    Extract 特記仕様書 items from a PDF and return structured JSON grouped by article.
-    Mirrors the output of running final_extractor.py on '03_特記仕様書 (1).pdf'.
+    Extract 特記仕様書 items from spec PDF and estimate reference info from estimate PDF.
+    Returns both spec extraction results and estimate reference information.
     """
     logger.info("=== STARTING SPEC PDF EXTRACTION ===")
-    if not pdf_file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="PDF file required")
+    logger.info(f"Spec PDF file: {spec_pdf_file.filename}")
+    logger.info(f"Estimate PDF file: {estimate_pdf_file.filename}")
 
-    pdf_fd = None
-    pdf_path = None
+    if not spec_pdf_file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Spec PDF file required")
+    if not estimate_pdf_file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=400, detail="Estimate PDF file required")
+    if not estimate_page_number or estimate_page_number.strip() == '':
+        raise HTTPException(
+            status_code=400, detail="Estimate page number is required")
+
+    spec_pdf_fd = None
+    spec_pdf_path = None
+    estimate_pdf_fd = None
+    estimate_pdf_path = None
+
     try:
-        pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='spec_')
-        content = await pdf_file.read()
-        with os.fdopen(pdf_fd, 'wb') as f:
-            f.write(content)
-        pdf_fd = None
+        # Process spec PDF
+        spec_pdf_fd, spec_pdf_path = tempfile.mkstemp(
+            suffix='.pdf', prefix='spec_')
+        spec_content = await spec_pdf_file.read()
+        with os.fdopen(spec_pdf_fd, 'wb') as f:
+            f.write(spec_content)
+        spec_pdf_fd = None
 
-        extractor = SpecFinalExtractor(pdf_path)
-        extracted = extractor.extract_all()
+        # Process estimate PDF
+        estimate_pdf_fd, estimate_pdf_path = tempfile.mkstemp(
+            suffix='.pdf', prefix='estimate_')
+        estimate_content = await estimate_pdf_file.read()
+        with os.fdopen(estimate_pdf_fd, 'wb') as f:
+            f.write(estimate_content)
+        estimate_pdf_fd = None
 
-        # Format as list of {section, data}
-        response = [
-            {"section": section, "data": data} for section, data in extracted
+        # Extract spec information
+        spec_extractor = SpecFinalExtractor(spec_pdf_path)
+        spec_extracted = spec_extractor.extract_all()
+
+        # Extract estimate reference information
+        estimate_extractor = None
+        try:
+            # Convert page number to integer (subtract 1 for 0-based indexing)
+            page_number = int(estimate_page_number) - 1
+            logger.info(
+                f"Extracting estimate info from page {estimate_page_number} (index {page_number})")
+
+            estimate_extractor = EstimateReferenceExtractor(estimate_pdf_path)
+            estimate_info = estimate_extractor.extract_estimate_info(
+                page_number)
+        except Exception as e:
+            logger.error(f"Error extracting estimate info: {str(e)}")
+            estimate_info = {
+                '省庁': 'Not Found',
+                '年度': 'Not Found',
+                '経費工種': 'Not Found',
+                '施工地域工事場所': 'Not Found'
+            }
+        finally:
+            # Ensure the extractor is properly cleaned up
+            if estimate_extractor:
+                try:
+                    estimate_extractor.close()
+                except Exception:
+                    pass
+
+        # Format spec response as list of {section, data}
+        spec_response = [
+            {"section": section, "data": data} for section, data in spec_extracted
         ]
+
+        # Add estimate info as additional fields to the response
+        response = {
+            "sections": spec_response,
+            "spec_filename": spec_pdf_file.filename,
+            "estimate_filename": estimate_pdf_file.filename,
+            # Add estimate fields directly to the response
+            "省庁": estimate_info.get('省庁', 'Not Found'),
+            "年度": estimate_info.get('年度', 'Not Found'),
+            "経費工種": estimate_info.get('経費工種', 'Not Found'),
+            "施工地域工事場所": estimate_info.get('施工地域工事場所', 'Not Found')
+        }
+
         logger.info("=== SPEC EXTRACTION COMPLETED ===")
-        return {"sections": response, "filename": pdf_file.filename}
+        logger.info(f"Extracted estimate info: {estimate_info}")
+        return response
+
     except Exception as e:
         logger.error(f"Spec extraction error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Spec extraction error: {str(e)}")
     finally:
+        # Clean up spec PDF
         try:
-            if pdf_fd is not None:
-                os.close(pdf_fd)
+            if spec_pdf_fd is not None:
+                os.close(spec_pdf_fd)
         except Exception:
             pass
-        if pdf_path and os.path.exists(pdf_path):
+        if spec_pdf_path and os.path.exists(spec_pdf_path):
             try:
-                os.unlink(pdf_path)
+                os.unlink(spec_pdf_path)
             except Exception:
                 pass
+
+        # Clean up estimate PDF
+        try:
+            if estimate_pdf_fd is not None:
+                os.close(estimate_pdf_fd)
+        except Exception:
+            pass
+        if estimate_pdf_path and os.path.exists(estimate_pdf_path):
+            try:
+                os.unlink(estimate_pdf_path)
+            except Exception:
+                pass
+
         gc.collect()
 
 
