@@ -317,8 +317,28 @@ async def download_checklist(
         generator = ChecklistExcelGenerator()
         file_path = generator.generate_checklist_excel(spec_result)
 
-        # Return the file for download
-        return FileResponse(
+        # Create a custom response that handles cleanup after sending
+        class CleanupFileResponse(FileResponse):
+            def __init__(self, path: str, filename: str, media_type: str):
+                super().__init__(path=path, filename=filename, media_type=media_type)
+                self._file_path = path
+
+            async def __call__(self, scope, receive, send):
+                try:
+                    await super().__call__(scope, receive, send)
+                finally:
+                    # Clean up the file after the response is sent
+                    if self._file_path and os.path.exists(self._file_path):
+                        try:
+                            os.unlink(self._file_path)
+                            logger.info(
+                                f"Cleaned up temporary file: {self._file_path}")
+                        except Exception as cleanup_error:
+                            logger.warning(
+                                f"Failed to clean up file {self._file_path}: {cleanup_error}")
+
+        # Return the custom response for download
+        return CleanupFileResponse(
             path=file_path,
             filename=os.path.basename(file_path),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
