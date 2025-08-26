@@ -1,5 +1,7 @@
 from ..services.estimate_extractor import EstimateReferenceExtractor
 from ..services.spec_extractor import SpecFinalExtractor
+from ..services.management_fee_extractor import ManagementFeeExtractor
+from ..services.checklist_excel_generator import ChecklistExcelGenerator
 from ..services.extraction_cache_service import get_extraction_cache
 from ..services.normalizer import Normalizer
 from ..services.excel_table_extractor_service import ExcelTableExtractorService
@@ -12,8 +14,9 @@ import time
 import logging
 import gc
 import tempfile
-from typing import List, Optional, Dict
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Body
+from fastapi.responses import FileResponse
 from subtable_title_comparator import compare_all_subtable_titles, compare_all_subtable_titles_from_cached_data
 import sys
 import os
@@ -137,7 +140,9 @@ async def test_new_extraction_endpoint(excel_file: UploadFile = File(...)):
 async def extract_spec_pdf(
     spec_pdf_file: UploadFile = File(...),
     estimate_pdf_file: UploadFile = File(...),
-    estimate_page_number: str = Form(...)
+    estimate_page_number: str = Form(...),
+    management_fee_start_page: Optional[int] = Form(None),
+    management_fee_end_page: Optional[int] = Form(None)
 ):
     """
     Extract 特記仕様書 items from spec PDF and estimate reference info from estimate PDF.
@@ -214,6 +219,30 @@ async def extract_spec_pdf(
             {"section": section, "data": data} for section, data in spec_extracted
         ]
 
+        # Extract management fee subtables if page range is provided
+        management_fee_data = []
+        if management_fee_start_page is not None and management_fee_end_page is not None:
+            try:
+                logger.info(
+                    f"Extracting management fee subtables from pages {management_fee_start_page} to {management_fee_end_page}")
+                management_fee_extractor = ManagementFeeExtractor(
+                    estimate_pdf_path)
+                management_fee_data = management_fee_extractor.extract_management_fee_subtables(
+                    management_fee_start_page, management_fee_end_page
+                )
+                logger.info(
+                    f"Extracted {len(management_fee_data)} management fee subtable rows")
+            except Exception as e:
+                logger.error(
+                    f"Error extracting management fee subtables: {str(e)}")
+                management_fee_data = []
+            finally:
+                if 'management_fee_extractor' in locals():
+                    try:
+                        management_fee_extractor.close()
+                    except Exception:
+                        pass
+
         # Add estimate info as additional fields to the response
         response = {
             "sections": spec_response,
@@ -223,11 +252,17 @@ async def extract_spec_pdf(
             "省庁": estimate_info.get('省庁', 'Not Found'),
             "年度": estimate_info.get('年度', 'Not Found'),
             "経費工種": estimate_info.get('経費工種', 'Not Found'),
-            "施工地域工事場所": estimate_info.get('施工地域工事場所', 'Not Found')
+            "施工地域工事場所": estimate_info.get('施工地域工事場所', 'Not Found'),
+            # Add management fee data
+            "management_fee_subtables": management_fee_data
         }
 
         logger.info("=== SPEC EXTRACTION COMPLETED ===")
         logger.info(f"Extracted estimate info: {estimate_info}")
+        logger.info(f"Extracted {len(spec_response)} spec sections")
+        logger.info(
+            f"Extracted {len(management_fee_data)} management fee subtable rows")
+
         return response
 
     except Exception as e:
@@ -260,6 +295,42 @@ async def extract_spec_pdf(
                 pass
 
         gc.collect()
+
+
+@router.post("/download-checklist")
+async def download_checklist(
+    spec_result: Dict[str, Any] = Body(...)
+) -> FileResponse:
+    """
+    Download checklist Excel file from spec extraction results.
+
+    Args:
+        spec_result: The spec extraction result data
+
+    Returns:
+        Excel file download
+    """
+    try:
+        logger.info("=== DOWNLOADING CHECKLIST EXCEL ===")
+
+        # Generate the checklist Excel file
+        generator = ChecklistExcelGenerator()
+        file_path = generator.generate_checklist_excel(spec_result)
+
+        # Return the file for download
+        return FileResponse(
+            path=file_path,
+            filename=os.path.basename(file_path),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Error generating checklist Excel: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate checklist Excel: {str(e)}"
+        )
 
 
 @router.post("/extract-and-cache")
