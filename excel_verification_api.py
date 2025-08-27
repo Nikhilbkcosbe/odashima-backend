@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import List, Dict, Optional, Union, Tuple, Any
 from dataclasses import dataclass, asdict
@@ -35,6 +36,12 @@ class HierarchicalItem:
     children: List['HierarchicalItem']
     raw_fields: Dict[str, str]
     amount_verification: Optional[Dict[str, Any]] = None
+    # For 単価 × 数量 = 金額 verification
+    calculation_verification: Optional[Dict[str, Any]] = None
+    # Table information
+    table_number: Optional[int] = None
+    reference_number: Optional[str] = None
+    is_main_table: bool = True
 
 
 @dataclass
@@ -44,6 +51,7 @@ class VerificationResult:
     verified_items: int
     mismatched_items: int
     mismatches: List[Dict[str, Any]]
+    calculation_mismatches: List[Dict[str, Any]]  # For 単価 × 数量 = 金額 mismatches
     business_logic_verified: bool
     extraction_successful: bool
     error_message: Optional[str] = None
@@ -61,6 +69,38 @@ class HierarchicalExcelExtractor:
             "数量・金額増減": ["数量・金額増減", "増減", "変更"],
             "摘要": ["摘要", "備考", "摘　要"]
         }
+
+    def normalize_text(self, text: str) -> str:
+        """Normalize text by removing spaces and converting full-width characters to half-width"""
+        if not text or pd.isna(text):
+            return ""
+
+        # Convert to string if not already
+        text = str(text).strip()
+
+        # Convert full-width characters to half-width
+        full_to_half = str.maketrans(
+            '０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ'
+            'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ　',
+            '0123456789abcdefghijklmnopqrstuvwxyz'
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZ '
+        )
+        text = text.translate(full_to_half)
+
+        # Remove all spaces for comparison
+        text = re.sub(r'\s+', '', text)
+
+        return text
+
+    def find_reference_number_pattern(self, text: str) -> bool:
+        """Check if text matches the reference number pattern: kanji + Number + 号"""
+        if not text:
+            return False
+
+        normalized = self.normalize_text(text)
+        # Pattern: one or more kanji characters followed by number(s) followed by 号
+        pattern = r'[\u4e00-\u9faf]+\d+号'
+        return bool(re.search(pattern, normalized))
 
     def extract_hierarchical_data(self, file_path: str, sheet_name: str) -> List[HierarchicalItem]:
         """Extract hierarchical data from Excel sheet with row spanning logic"""
@@ -96,7 +136,245 @@ class HierarchicalExcelExtractor:
             hierarchical_items)
         logger.info("Amount verification completed")
 
+        # Verify row-level calculations (単価 × 数量 = 金額)
+        hierarchical_items = self._verify_row_calculations(hierarchical_items)
+        logger.info("Row calculation verification completed")
+
         return hierarchical_items
+
+    def extract_hierarchical_data_from_all_sheets(self, file_path: str, main_sheet_name: str) -> List[HierarchicalItem]:
+        """Extract hierarchical data from main sheet and subtable data from other sheets"""
+        logger.info(
+            f"Extracting hierarchical data from main sheet: {main_sheet_name}")
+
+        # Get all sheet names
+        xl_file = pd.ExcelFile(file_path)
+        all_sheets = xl_file.sheet_names
+        logger.info(f"Available sheets: {all_sheets}")
+
+        # Extract from main sheet using hierarchical extraction
+        main_items = self.extract_hierarchical_data(file_path, main_sheet_name)
+
+        # Ensure all items from main sheet use table numbers instead of is_main_table flag
+        for item in main_items:
+            item.is_main_table = False  # Use table numbers instead of is_main_table flag
+            # Keep the table_number from hierarchical extraction (already incremented)
+            item.reference_number = None  # Clear reference number for main table items
+
+        # After hierarchical calculation, apply normal Excel extraction for row verification
+        logger.info(
+            "Applying normal Excel extraction for row-level calculation verification")
+        normal_excel_items = self._extract_normal_excel_data_for_row_verification(
+            file_path, main_sheet_name)
+
+        # Combine hierarchical items and normal Excel items
+        all_items = main_items + normal_excel_items
+
+        # Re-verify calculations for all items
+        all_items = self._verify_row_calculations(all_items)
+        logger.info("Row calculation verification completed for all items")
+
+        return all_items
+
+    def _extract_normal_rows_from_main_sheet(self, file_path: str, sheet_name: str) -> List[HierarchicalItem]:
+        """Extract all rows from main sheet using normal row extraction for calculation verification"""
+        try:
+            # Read the main sheet
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+
+            # Use the same logic as hierarchical extraction but extract all logical rows
+            logical_rows = self._extract_logical_rows_with_spanning(df)
+
+            # Convert to HierarchicalItem format
+            hierarchical_items = []
+            for row in logical_rows:
+                # Skip rows that don't have item names (empty rows)
+                if not row.get('item_name', '').strip():
+                    continue
+
+                hierarchical_item = HierarchicalItem(
+                    item_name=row.get('item_name', ''),
+                    unit=row.get('unit', ''),
+                    quantity=row.get('quantity', 0),
+                    unit_price=row.get('unit_price', 0),
+                    amount=row.get('amount', 0),
+                    notes=row.get('notes', ''),
+                    level=0,  # Normal row items are treated as level 0
+                    children=[],
+                    raw_fields=row.get('raw_fields', {}),
+                    amount_verification=None
+                )
+
+                # Override table information - these are ALL from main sheet
+                hierarchical_item.table_number = None
+                hierarchical_item.reference_number = None
+                hierarchical_item.is_main_table = True
+
+                hierarchical_items.append(hierarchical_item)
+
+            logger.info(
+                f"Extracted {len(hierarchical_items)} normal rows from main sheet for calculation verification")
+            return hierarchical_items
+
+        except Exception as e:
+            logger.error(f"Error extracting normal rows from main sheet: {e}")
+            return []
+
+    def _extract_subtable_data(self, file_path: str, sheet_name: str) -> List[HierarchicalItem]:
+        """Extract data from subtable sheets using both subtable extraction and hierarchical extraction"""
+        logger.info(f"Extracting subtable data from sheet: {sheet_name}")
+
+        hierarchical_items = []
+
+        # First, extract formal subtables with reference numbers
+        try:
+            from excel_subtable_extractor import extract_subtables_from_excel_sheet
+            subtables = extract_subtables_from_excel_sheet(
+                file_path, sheet_name)
+            logger.info(
+                f"Found {len(subtables)} formal subtables in sheet {sheet_name}")
+
+            for subtable in subtables:
+                reference_number = subtable.get('reference_number', 'Unknown')
+                logger.info(
+                    f"Processing subtable with reference number: {reference_number}")
+
+                # Convert subtable data rows to hierarchical items
+                for row in subtable.get('data_rows', []):
+                    # Create a hierarchical item from the subtable row
+                    hierarchical_item = HierarchicalItem(
+                        item_name=row.get('名称', ''),
+                        unit=row.get('単位', ''),
+                        quantity=row.get('数量', ''),
+                        unit_price=row.get('単価', ''),
+                        amount=row.get('金額', ''),
+                        notes=row.get('摘要', ''),
+                        level=0,  # Subtable items are typically level 0
+                        children=[],
+                        raw_fields=row,
+                        amount_verification=None
+                    )
+
+                    # Add subtable information
+                    hierarchical_item.table_number = None  # No table number for subtables
+                    hierarchical_item.reference_number = reference_number
+                    hierarchical_item.is_main_table = False  # This is a subtable
+
+                    hierarchical_items.append(hierarchical_item)
+
+        except ImportError:
+            logger.error("Could not import excel_subtable_extractor")
+
+        logger.info(
+            f"Total items extracted from sheet {sheet_name}: {len(hierarchical_items)}")
+        return hierarchical_items
+
+    def _extract_normal_excel_data_for_row_verification(self, file_path: str, main_sheet_name: str) -> List[HierarchicalItem]:
+        """Extract normal Excel data from main table and subtables for row-level calculation verification"""
+        try:
+            all_items = []
+
+            # Get all sheets
+            excel_file = pd.ExcelFile(file_path)
+            all_sheets = excel_file.sheet_names
+
+            # Process main sheet using normal row extraction
+            logger.info(
+                f"Processing main sheet for row verification: {main_sheet_name}")
+            try:
+                # Read the main sheet
+                df = pd.read_excel(
+                    file_path, sheet_name=main_sheet_name, header=None)
+
+                # Extract all rows using the same logic as hierarchical extraction
+                # This will capture all detailed items for calculation verification
+                all_rows = self._extract_logical_rows_with_spanning(df)
+
+                # Convert to HierarchicalItem format and mark as main table
+                for row in all_rows:
+                    hierarchical_item = HierarchicalItem(
+                        item_name=row.get('item_name', ''),
+                        unit=row.get('unit', ''),
+                        quantity=row.get('quantity', 0),
+                        unit_price=row.get('unit_price', 0),
+                        amount=row.get('amount', 0),
+                        notes=row.get('notes', ''),
+                        level=0,  # All normal rows are level 0
+                        children=[],
+                        raw_fields=row.get('raw_fields', {}),
+                        amount_verification=None
+                    )
+
+                    # Keep the table number from the row data for main sheet items
+                    # Main sheet items use table numbers instead of is_main_table flag
+                    # Table numbers are detected at the end of each table, so use as-is
+                    hierarchical_item.is_main_table = False  # Use table number instead
+                    table_num = row.get('table_number', None)
+                    if table_num is not None:
+                        hierarchical_item.table_number = table_num
+                    else:
+                        hierarchical_item.table_number = None
+                    hierarchical_item.reference_number = None
+
+                    all_items.append(hierarchical_item)
+
+                logger.info(
+                    f"Extracted {len(all_items)} items from main sheet for row verification")
+
+            except Exception as e:
+                logger.error(
+                    f"Error processing main sheet {main_sheet_name} for row verification: {e}")
+
+            # TODO: Commented out subtable extraction and calculation for future use
+            # Process other sheets using subtable extraction
+            # for sheet_name in all_sheets:
+            #     if sheet_name != main_sheet_name:
+            #         logger.info(
+            #             f"Processing subtable sheet for row verification: {sheet_name}")
+            #         try:
+            #             # Use existing subtable extraction logic
+            #             from excel_subtable_extractor import extract_subtables_from_excel_sheet
+            #             subtable_items = extract_subtables_from_excel_sheet(
+            #                 file_path, sheet_name)
+
+            #             # Convert to HierarchicalItem format and mark as subtable
+            #             for subtable in subtable_items:
+            #                 reference_number = subtable.get(
+            #                     'reference_number', '')
+            #                 for row in subtable.get('data_rows', []):
+            #                     hierarchical_item = HierarchicalItem(
+            #                         item_name=row.get('名称', ''),
+            #                         unit=row.get('単位', ''),
+            #                         quantity=row.get('数量', 0),
+            #                         unit_price=row.get('単価', 0),
+            #                         amount=row.get('金額', 0),
+            #                         notes=row.get('摘要', ''),
+            #                         level=0,  # All normal rows are level 0
+            #                         children=[],
+            #                         raw_fields=row,
+            #                         amount_verification=None
+            #                     )
+
+            #                     # Mark as subtable with reference number
+            #                     hierarchical_item.is_main_table = False
+            #                     hierarchical_item.table_number = None
+            #                     hierarchical_item.reference_number = reference_number
+
+            #                     all_items.append(hierarchical_item)
+
+            #             logger.info(
+            #                 f"Extracted {len([item for item in all_items if not item.is_main_table and item.reference_number])} subtable items from {sheet_name}")
+
+            #         except Exception as e:
+            #             logger.error(
+            #                 f"Error processing subtable sheet {sheet_name} for row verification: {e}")
+
+            return all_items
+
+        except Exception as e:
+            logger.error(
+                f"Error in normal Excel data extraction for row verification: {e}")
+            return []
 
     def _find_header_row(self, df: pd.DataFrame) -> Optional[int]:
         """Find the header row containing column names"""
@@ -173,11 +451,35 @@ class HierarchicalExcelExtractor:
         """Extract logical rows with row spanning logic across multiple tables"""
         logical_rows = []
         current_row_idx = header_row_idx + 1
+        current_table_number = None  # Track current table number
+        current_reference_number = None  # Track current reference number
+        is_main_table = True  # First table is main table
 
         while current_row_idx < len(df):
+            # Check for table number row
             if self._is_table_number_row(df.iloc[current_row_idx]):
+                # Extract table number
+                table_row = df.iloc[current_row_idx]
+                non_empty_values = [
+                    str(val).strip() for val in table_row if pd.notna(val) and str(val).strip()]
+                if non_empty_values:
+                    # When we find a table number, items that come after this should be assigned to the NEXT table number
+                    # since table numbers appear at the end of each table
+                    detected_table_number = non_empty_values[0]
+                    try:
+                        # Convert to int, add 1, then back to string
+                        next_table_number = str(int(detected_table_number) + 1)
+                        current_table_number = next_table_number
+                    except (ValueError, TypeError):
+                        # If conversion fails, use the detected number as-is
+                        current_table_number = detected_table_number
+
+                    # First table is main
+                    is_main_table = (detected_table_number ==
+                                     "1" or detected_table_number == "1.0")
+
                 logger.info(
-                    f"Found table number at row {current_row_idx + 1}, looking for next header")
+                    f"Found table number '{detected_table_number}' at row {current_row_idx + 1}, assigning items to table '{current_table_number}'")
                 next_header_idx = self._find_next_header_row(
                     df, current_row_idx + 1)
                 if next_header_idx is not None:
@@ -188,9 +490,22 @@ class HierarchicalExcelExtractor:
                     logger.info("No more headers found, ending extraction")
                     break
             else:
+                # Check for reference number in the current row (only in first few columns)
+                row_data = df.iloc[current_row_idx]
+                for col_idx, cell_value in enumerate(row_data):
+                    if col_idx <= 3 and self.find_reference_number_pattern(str(cell_value)):
+                        current_reference_number = str(cell_value).strip()
+                        logger.info(
+                            f"Found reference number '{current_reference_number}' at row {current_row_idx + 1}, col {col_idx}")
+                        break
+
                 logical_row = self._extract_single_logical_row(
                     df, current_row_idx, column_positions)
                 if logical_row:
+                    # Add table information to the logical row
+                    logical_row['table_number'] = current_table_number
+                    logical_row['reference_number'] = current_reference_number
+                    logical_row['is_main_table'] = is_main_table
                     logical_rows.append(logical_row)
                     current_row_idx = logical_row['end_row'] + 1
                 else:
@@ -211,7 +526,10 @@ class HierarchicalExcelExtractor:
         # Extract data from first row
         item_name = self._get_cell_value(
             first_row, column_positions.get('item_name', 1), preserve_spaces=True)
-        unit = self._get_cell_value(first_row, column_positions.get('unit', 2))
+        # TODO: Commented out unit extraction for future use
+        # unit = self._get_cell_value(
+        #     first_row, column_positions.get('unit', 2), normalize=True)
+        unit = ""  # For now, set unit as empty string
         quantity = self._get_cell_value(
             first_row, column_positions.get('quantity', 4))
         unit_price = self._get_cell_value(
@@ -228,8 +546,10 @@ class HierarchicalExcelExtractor:
                 next_row, column_positions.get('item_name', 1), preserve_spaces=True)
             next_quantity = self._get_cell_value(
                 next_row, column_positions.get('quantity', 4))
-            next_unit = self._get_cell_value(
-                next_row, column_positions.get('unit', 2))
+            # TODO: Commented out unit extraction for future use
+            # next_unit = self._get_cell_value(
+            #     next_row, column_positions.get('unit', 2), normalize=True)
+            next_unit = ""  # For now, set unit as empty string
             next_unit_price = self._get_cell_value(
                 next_row, column_positions.get('unit_price', 5))
             next_amount = self._get_cell_value(
@@ -296,12 +616,14 @@ class HierarchicalExcelExtractor:
             }
         }
 
-    def _get_cell_value(self, row: pd.Series, col_idx: int, preserve_spaces: bool = False) -> str:
+    def _get_cell_value(self, row: pd.Series, col_idx: int, preserve_spaces: bool = False, normalize: bool = False) -> str:
         """Get cell value safely"""
         if col_idx < len(row) and pd.notna(row.iloc[col_idx]):
             value = str(row.iloc[col_idx])
             if preserve_spaces:
                 return value
+            elif normalize:
+                return self.normalize_text(value)
             else:
                 return value.strip()
         return ""
@@ -334,6 +656,19 @@ class HierarchicalExcelExtractor:
                 raw_fields=row['raw_fields'],
                 amount_verification=None
             )
+
+            # Add table information to the hierarchical item
+            # Table numbers are detected at the end of each table, so use as-is
+            table_num = row.get('table_number', None)
+            if table_num is not None:
+                hierarchical_item.table_number = table_num
+            else:
+                # If no table number detected, assign default table number "1" for main sheet items
+                hierarchical_item.table_number = "1"
+            hierarchical_item.reference_number = row.get(
+                'reference_number', None)
+            # Always set is_main_table = False for main sheet items (use table numbers instead)
+            hierarchical_item.is_main_table = False
 
             parent = self._find_parent_across_tables(stack, level)
 
@@ -398,11 +733,17 @@ class HierarchicalExcelExtractor:
                 'notes': item.notes,
                 'level': item.level,
                 'children': [item_to_dict(child) for child in item.children],
-                'raw_fields': item.raw_fields
+                'raw_fields': item.raw_fields,
+                'table_number': getattr(item, 'table_number', None),
+                'reference_number': getattr(item, 'reference_number', None),
+                'is_main_table': getattr(item, 'is_main_table', True)
             }
 
             if hasattr(item, 'amount_verification') and item.amount_verification is not None:
                 result['amount_verification'] = item.amount_verification
+
+            if hasattr(item, 'calculation_verification') and item.calculation_verification is not None:
+                result['calculation_verification'] = item.calculation_verification
 
             return result
 
@@ -498,17 +839,114 @@ class HierarchicalExcelExtractor:
 
         return total
 
+    def _verify_row_calculations(self, hierarchical_items: List[HierarchicalItem]) -> List[HierarchicalItem]:
+        """Verify row-level calculations: 単価 × 数量 = 金額 for all items"""
+        def verify_item_calculations(item: HierarchicalItem):
+            # Check if this item has actual numeric data in all three columns (not blank/empty)
+            has_unit_price = item.unit_price and item.unit_price.strip(
+            ) and item.unit_price != "" and item.unit_price != "0"
+            has_quantity = item.quantity and item.quantity.strip(
+            ) and item.quantity != "" and item.quantity != "0"
+            has_amount = item.amount and item.amount.strip(
+            ) and item.amount != "" and item.amount != "0"
+
+            # Only perform calculation if all three values are present and non-zero
+            if has_unit_price and has_quantity and has_amount:
+                try:
+                    # Convert values to float, handling commas
+                    unit_price = float(item.unit_price.replace(',', ''))
+                    quantity = float(item.quantity.replace(',', ''))
+                    actual_amount = float(item.amount.replace(',', ''))
+
+                    # Additional check: ensure values are actually positive numbers (not zero or negative)
+                    if unit_price <= 0 or quantity <= 0 or actual_amount <= 0:
+                        # Skip calculation for zero or negative values
+                        item.calculation_verification = None
+                        return
+
+                    # Calculate expected amount based on unit type
+                    # TODO: Commented out percentage calculation logic for future use
+                    # if item.unit == '%':
+                    #     # For percentage units: 単価 × (数量 ÷ 100)
+                    #     expected_amount = unit_price * (quantity / 100)
+                    # else:
+                    #     # For regular units: 単価 × 数量
+                    #     expected_amount = unit_price * quantity
+
+                    # For now, use regular calculation for all units
+                    expected_amount = unit_price * quantity
+
+                    # Check if amounts match (with small tolerance for floating point precision)
+                    tolerance = 0.01  # 1 cent tolerance
+                    is_matched = abs(expected_amount -
+                                     actual_amount) <= tolerance
+
+                    # Add calculation verification to the item
+                    item.calculation_verification = {
+                        'is_matched': is_matched,
+                        'unit_price': unit_price,
+                        'quantity': quantity,
+                        'expected_amount': expected_amount,
+                        'actual_amount': actual_amount,
+                        'difference': actual_amount - expected_amount
+                    }
+
+                    # Log the calculation method used
+                    # TODO: Commented out percentage method logging for future use
+                    # calc_method = "percentage" if item.unit == '%' else "regular"
+                    # logger.info(f"Row calculation verification for '{item.item_name}': "
+                    #             f"単価: {unit_price}, 数量: {quantity}, "
+                    #             f"Unit: {item.unit}, Method: {calc_method}, "
+                    #             f"Expected: {expected_amount:,.0f}, "
+                    #             f"Actual: {actual_amount:,.0f}, "
+                    #             f"Matched: {is_matched}")
+
+                    logger.info(f"Row calculation verification for '{item.item_name}': "
+                                f"単価: {unit_price}, 数量: {quantity}, "
+                                f"Expected: {expected_amount:,.0f}, "
+                                f"Actual: {actual_amount:,.0f}, "
+                                f"Matched: {is_matched}")
+
+                except (ValueError, AttributeError) as e:
+                    # If conversion fails, mark as not matched
+                    item.calculation_verification = {
+                        'is_matched': False,
+                        'unit_price': 0.0,
+                        'quantity': 0.0,
+                        'expected_amount': 0.0,
+                        'actual_amount': 0.0,
+                        'difference': 0.0,
+                        'error': f"Conversion error: {str(e)}"
+                    }
+                    logger.warning(
+                        f"Row calculation verification failed for '{item.item_name}': {str(e)}")
+            else:
+                # If any of the required fields are missing, set verification to None
+                item.calculation_verification = None
+
+            # Recursively verify children
+            for child in item.children:
+                verify_item_calculations(child)
+
+        # Verify all items recursively
+        for item in hierarchical_items:
+            verify_item_calculations(item)
+
+        return hierarchical_items
+
     def _calculate_junkoji_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
-        """Calculate 純工事費 amount: 直接工事費 + sum of Level 0 items before 純工事費 (excluding 直接工事費)"""
+        """Calculate 純工事費 amount: 直接工事費 + sum of Level 0 items after 直接工事費 until 純工事費 (excluding 純工事費)"""
         total = 0.0
 
         # Find 直接工事費 amount
         chokkoji_amount = 0.0
-        for item in hierarchical_items:
+        chokkoji_index = -1
+        for i, item in enumerate(hierarchical_items):
             if item.item_name == "直接工事費":
                 try:
                     chokkoji_amount = float(item.amount.replace(
                         ',', '')) if item.amount else 0.0
+                    chokkoji_index = i
                 except (ValueError, AttributeError):
                     pass
                 break
@@ -516,20 +954,23 @@ class HierarchicalExcelExtractor:
         # Start with 直接工事費 amount
         total = chokkoji_amount
 
-        # Find the position of 純工事費 to determine which items come before it
+        # Find the position of 純工事費
         junkoji_index = -1
         for i, item in enumerate(hierarchical_items):
             if item.level == 0 and item.item_name == "純工事費":
                 junkoji_index = i
                 break
 
-        # If 純工事費 is not found, return just 直接工事費 amount
-        if junkoji_index == -1:
+        # If either 直接工事費 or 純工事費 is not found, return just 直接工事費 amount
+        if chokkoji_index == -1 or junkoji_index == -1:
             return total
 
-        # Add sum of all Level 0 items that come before 純工事費 (excluding 直接工事費 to avoid double counting)
+        # Add sum of Level 0 items that come after 直接工事費 until 純工事費 (excluding 純工事費)
         for i, item in enumerate(hierarchical_items):
-            if item.level == 0 and i < junkoji_index and item.item_name != "直接工事費":
+            if (item.level == 0 and
+                i > chokkoji_index and
+                i < junkoji_index and
+                    item.item_name != "純工事費"):
                 try:
                     amount = float(item.amount.replace(
                         ',', '')) if item.amount else 0.0
@@ -714,11 +1155,23 @@ class ComprehensiveVerifier:
                     junkoji_index = i
                     break
 
-            # Calculate expected amount: 直接工事費 + sum of Level 0 items before 純工事費 (excluding 直接工事費)
+            # Calculate expected amount: 直接工事費 + sum of Level 0 items after 直接工事費 until 純工事費 (excluding 純工事費)
             expected_amount = chokkoji_amount
-            if junkoji_index != -1:
+
+            # Find the position of 直接工事費
+            chokkoji_index = -1
+            for i, item in enumerate(data):
+                if item['level'] == 0 and item['item_name'] == '直接工事費':
+                    chokkoji_index = i
+                    break
+
+            # Add items between 直接工事費 and 純工事費
+            if chokkoji_index != -1 and junkoji_index != -1:
                 for i, item in enumerate(data):
-                    if item['level'] == 0 and i < junkoji_index and item['item_name'] != '直接工事費':
+                    if (item['level'] == 0 and
+                        i > chokkoji_index and
+                        i < junkoji_index and
+                            item['item_name'] != '純工事費'):
                         try:
                             amount = float(
                                 item['amount']) if item['amount'] else 0.0
@@ -901,14 +1354,15 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
                 verified_items=0,
                 mismatched_items=0,
                 mismatches=[],
+                calculation_mismatches=[],
                 business_logic_verified=False,
                 extraction_successful=False,
                 error_message=f"File not found: {file_path}"
             )
 
-        # Extract hierarchical data
+        # Extract hierarchical data from main sheet and all subtable sheets
         extractor = HierarchicalExcelExtractor()
-        hierarchical_items = extractor.extract_hierarchical_data(
+        hierarchical_items = extractor.extract_hierarchical_data_from_all_sheets(
             file_path, sheet_name)
 
         # Convert to JSON format for verification
@@ -939,6 +1393,39 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
                     'item_name': item['item_name']
                 })
 
+        # Collect calculation mismatches (単価 × 数量 = 金額)
+        calculation_mismatches = []
+
+        def collect_calculation_mismatches(item, parent_path=""):
+            current_path = f"{parent_path}/{item['item_name']}" if parent_path else item['item_name']
+
+            if item.get('calculation_verification') and not item['calculation_verification']['is_matched']:
+                calc_verification = item['calculation_verification']
+                calculation_mismatches.append({
+                    'path': current_path,
+                    'level': item['level'],
+                    'item_name': item['item_name'],
+                    'unit_price': calc_verification['unit_price'],
+                    'quantity': calc_verification['quantity'],
+                    # TODO: Commented out unit field for future use
+                    # 'unit': item.get('unit', ''),
+                    'expected_amount': calc_verification['expected_amount'],
+                    'actual_amount': calc_verification['actual_amount'],
+                    'difference': calc_verification['difference'],
+                    'error': calc_verification.get('error', None),
+                    'table_number': item.get('table_number', None),
+                    'reference_number': item.get('reference_number', None),
+                    'is_main_table': item.get('is_main_table', True)
+                })
+
+            # Recursively check children
+            for child in item['children']:
+                collect_calculation_mismatches(child, current_path)
+
+        # Collect calculation mismatches from all items
+        for root_item in json_data:
+            collect_calculation_mismatches(root_item)
+
         # Combine mismatches from both verification methods and deduplicate
         all_mismatches = recursive_results['mismatches'] + \
             business_logic_mismatches
@@ -963,6 +1450,7 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
             verified_items=total_verified_items,
             mismatched_items=total_mismatched_items,
             mismatches=unique_mismatches,
+            calculation_mismatches=calculation_mismatches,
             business_logic_verified=business_logic_results['business_logic_verified'],
             extraction_successful=True,
             error_message=None
@@ -975,6 +1463,7 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
             verified_items=0,
             mismatched_items=0,
             mismatches=[],
+            calculation_mismatches=[],
             business_logic_verified=False,
             extraction_successful=False,
             error_message=str(e)
