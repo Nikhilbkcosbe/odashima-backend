@@ -590,21 +590,20 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         extra_main_items = matcher.get_extra_items_only_simplified(
             pdf_items, excel_items)
 
-        # Main table missing items (PDF items not in Excel)
-        # IMPORTANT: Strict name-only missing detection (exact match, ignore quantity/unit)
-        missing_main_items = matcher.get_missing_items_by_name_only_strict(
-            pdf_items, excel_items)
+        # Main table comparison (index-based) to detect MISSING with context
+        main_summary = matcher.compare_items(pdf_items, excel_items)
+        missing_main_results = [
+            r for r in main_summary.results if r.status == 'MISSING' and r.type == 'Main Table']
 
         # Subtable extra items (Excel subtables not in PDF)
         extra_subtable_items = matcher.get_extra_subtable_items_only(
             pdf_subtables, excel_subtables)
 
-        # Subtable missing items (PDF subtables not in Excel)
-        # Use comprehensive comparison and pick those marked as MISSING
-        _subtable_results_for_missing = matcher.compare_subtable_items(
+        # Subtable comparison (index-based within each reference) to detect MISSING with context
+        subtable_results_all = matcher.compare_subtable_items(
             pdf_subtables, excel_subtables)
-        missing_subtable_items = [
-            r.pdf_item for r in _subtable_results_for_missing if r.status == 'MISSING' and r.pdf_item is not None]
+        missing_subtable_results = [
+            r for r in subtable_results_all if r.status == 'MISSING']
 
         # QUANTITY AND UNIT MISMATCH ANALYSIS
         # Get quantity mismatches for main table items
@@ -654,28 +653,54 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         # Combine MISSING items (PDF items not in Excel) for frontend display
         combined_missing_items = []
 
-        # Add main table missing items with type indicator
-        for item in missing_main_items:
+        # Add main table missing items with nested pdf_item/excel_item for context
+        for r in missing_main_results:
             combined_missing_items.append({
-                "item_key": item.item_key,
-                "raw_fields": item.raw_fields,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "source": item.source,
-                "page_number": item.page_number,
+                "pdf_item": {
+                    "item_key": r.pdf_item.item_key if r.pdf_item else None,
+                    "raw_fields": r.pdf_item.raw_fields if r.pdf_item else None,
+                    "quantity": r.pdf_item.quantity if r.pdf_item else None,
+                    "unit": r.pdf_item.unit if r.pdf_item else None,
+                    "source": r.pdf_item.source if r.pdf_item else None,
+                    "page_number": r.pdf_item.page_number if r.pdf_item else None,
+                },
+                "excel_item": {
+                    "item_key": r.excel_item.item_key if r.excel_item else None,
+                    "raw_fields": r.excel_item.raw_fields if r.excel_item else None,
+                    "quantity": r.excel_item.quantity if r.excel_item else None,
+                    "unit": r.excel_item.unit if r.excel_item else None,
+                    "source": r.excel_item.source if r.excel_item else None,
+                    "page_number": r.excel_item.page_number if r.excel_item else None,
+                    "logical_line_number": getattr(r.excel_item, 'logical_line_number', None) if r.excel_item else None,
+                    "table_number": getattr(r.excel_item, 'table_number', None) if r.excel_item else None,
+                },
+                "status": "MISSING",
                 "type": "Main Table"
             })
 
-        # Add subtable missing items with type indicator
-        for item in missing_subtable_items:
+        # Add subtable missing items with nested pdf_item/excel_item
+        for r in missing_subtable_results:
             combined_missing_items.append({
-                "item_key": item.item_key,
-                "raw_fields": item.raw_fields,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "source": item.source,
-                "page_number": item.page_number,
-                "reference_number": getattr(item, 'reference_number', None),
+                "pdf_item": {
+                    "item_key": r.pdf_item.item_key if r.pdf_item else None,
+                    "raw_fields": r.pdf_item.raw_fields if r.pdf_item else None,
+                    "quantity": r.pdf_item.quantity if r.pdf_item else None,
+                    "unit": r.pdf_item.unit if r.pdf_item else None,
+                    "source": r.pdf_item.source if r.pdf_item else None,
+                    "page_number": r.pdf_item.page_number if r.pdf_item else None,
+                    "reference_number": getattr(r.pdf_item, 'reference_number', None) if r.pdf_item else None,
+                },
+                "excel_item": {
+                    "item_key": r.excel_item.item_key if r.excel_item else None,
+                    "raw_fields": r.excel_item.raw_fields if r.excel_item else None,
+                    "quantity": r.excel_item.quantity if r.excel_item else None,
+                    "unit": r.excel_item.unit if r.excel_item else None,
+                    "source": r.excel_item.source if r.excel_item else None,
+                    "page_number": r.excel_item.page_number if r.excel_item else None,
+                    "reference_number": getattr(r.excel_item, 'reference_number', None) if r.excel_item else None,
+                    "logical_line_number": getattr(r.excel_item, 'logical_line_number', None) if r.excel_item else None,
+                },
+                "status": "MISSING",
                 "type": "Sub Table"
             })
 
@@ -683,7 +708,7 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         logger.info(
             f"Extra items: {len(extra_main_items)} main, {len(extra_subtable_items)} subtable")
         logger.info(
-            f"Missing items: {len(missing_main_items)} main, {len(missing_subtable_items)} subtable")
+            f"Missing items: {len(missing_main_results)} main, {len(missing_subtable_results)} subtable")
 
         # Calculate detailed breakdown for comprehensive summary
         pdf_main_total = len(pdf_items)
@@ -707,8 +732,8 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
 
             # Missing items (PDF items not in Excel) - FIXED: Now included!
             "missing_items_count": len(combined_missing_items),
-            "missing_main_items_count": len(missing_main_items),
-            "missing_subtable_items_count": len(missing_subtable_items),
+            "missing_main_items_count": len(missing_main_results),
+            "missing_subtable_items_count": len(missing_subtable_results),
             "missing_items": combined_missing_items,
 
             # Quantity and Unit mismatch data
@@ -722,8 +747,8 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
                 "pdf_analysis": {
                     "main_table": {
                         "total_items": pdf_main_total,
-                        "missing_items": len(missing_main_items),
-                        "missing_percentage": round((len(missing_main_items) / pdf_main_total * 100), 1) if pdf_main_total > 0 else 0,
+                        "missing_items": len(missing_main_results),
+                        "missing_percentage": round((len(missing_main_results) / pdf_main_total * 100), 1) if pdf_main_total > 0 else 0,
                         "quantity_mismatches": len(main_quantity_mismatches),
                         "quantity_mismatch_percentage": round((len(main_quantity_mismatches) / pdf_main_total * 100), 1) if pdf_main_total > 0 else 0,
                         "unit_mismatches": len(main_unit_mismatches),
@@ -731,8 +756,8 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
                     },
                     "subtable": {
                         "total_items": pdf_subtable_total,
-                        "missing_items": len(missing_subtable_items),
-                        "missing_percentage": round((len(missing_subtable_items) / pdf_subtable_total * 100), 1) if pdf_subtable_total > 0 else 0,
+                        "missing_items": len(missing_subtable_results),
+                        "missing_percentage": round((len(missing_subtable_results) / pdf_subtable_total * 100), 1) if pdf_subtable_total > 0 else 0,
                         "quantity_mismatches": len(subtable_quantity_mismatches),
                         "quantity_mismatch_percentage": round((len(subtable_quantity_mismatches) / pdf_subtable_total * 100), 1) if pdf_subtable_total > 0 else 0,
                         "unit_mismatches": len(subtable_unit_mismatches),
@@ -740,8 +765,8 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
                     },
                     "overall": {
                         "total_items": pdf_main_total + pdf_subtable_total,
-                        "missing_items": len(missing_main_items) + len(missing_subtable_items),
-                        "missing_percentage": round(((len(missing_main_items) + len(missing_subtable_items)) / (pdf_main_total + pdf_subtable_total) * 100), 1) if (pdf_main_total + pdf_subtable_total) > 0 else 0,
+                        "missing_items": len(missing_main_results) + len(missing_subtable_results),
+                        "missing_percentage": round(((len(missing_main_results) + len(missing_subtable_results)) / (pdf_main_total + pdf_subtable_total) * 100), 1) if (pdf_main_total + pdf_subtable_total) > 0 else 0,
                         "quantity_mismatches": len(main_quantity_mismatches) + len(subtable_quantity_mismatches),
                         "quantity_mismatch_percentage": round(((len(main_quantity_mismatches) + len(subtable_quantity_mismatches)) / (pdf_main_total + pdf_subtable_total) * 100), 1) if (pdf_main_total + pdf_subtable_total) > 0 else 0,
                         "unit_mismatches": len(main_unit_mismatches) + len(subtable_unit_mismatches),
@@ -797,7 +822,9 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
                     "quantity": item.quantity,
                     "unit": item.unit,
                     "source": item.source,
-                    "page_number": item.page_number
+                    "page_number": item.page_number,
+                    "logical_line_number": getattr(item, 'logical_line_number', None),
+                    "table_number": getattr(item, 'table_number', None)
                 }
                 for item in excel_items
             ],
@@ -822,7 +849,8 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
                     "unit": item.unit,
                     "source": item.source,
                     "page_number": item.page_number,
-                    "reference_number": getattr(item, 'reference_number', None)
+                    "reference_number": getattr(item, 'reference_number', None),
+                    "logical_line_number": getattr(item, 'logical_line_number', None)
                 }
                 for item in excel_subtables
             ],

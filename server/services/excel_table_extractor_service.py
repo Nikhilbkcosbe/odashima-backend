@@ -179,7 +179,7 @@ class ExcelTableExtractorService:
                 sheet_name = subtable.get('sheet_name', '')
                 data_rows = subtable.get('data_rows', [])
 
-                for data_row in data_rows:
+                for idx, data_row in enumerate(data_rows, start=1):
                     try:
                         # Convert each data row to SubtableItem format
                         item_name = data_row.get('名称', '').strip()
@@ -216,7 +216,8 @@ class ExcelTableExtractorService:
                                 source="Excel",
                                 reference_number=reference_number,
                                 sheet_name=sheet_name,
-                                table_title=table_title
+                                table_title=table_title,
+                                logical_line_number=idx
                             )
                             all_subtable_items.append(subtable_item)
 
@@ -1130,7 +1131,9 @@ class ExcelTableExtractorService:
                     quantity=quantity,
                     unit=unit,
                     source="Excel",
-                    page_number=None
+                    page_number=None,
+                    logical_line_number=(row_idx + 1),
+                    table_number=str(table_idx + 1)
                 )
 
                 tender_items.append(tender_item)

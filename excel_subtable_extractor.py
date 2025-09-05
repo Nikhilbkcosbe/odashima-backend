@@ -108,8 +108,25 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
     amount_col = column_positions.get('金額', 7)
     notes_col = column_positions.get('摘要', 8)
 
+    # Helper to detect trailing table-number-only row which marks the end of a subtable
+    def _is_table_number_row(series_row: pd.Series) -> bool:
+        try:
+            values = [str(v).strip() for v in series_row.tolist()]
+            non_empty = [v for v in values if v and v.lower() != 'nan']
+            if len(non_empty) != 1:
+                return False
+            return non_empty[0].isdigit()
+        except Exception:
+            return False
+
     while current_row < len(df):
         row_data = df.iloc[current_row].fillna('')
+
+        # End-of-table: trailing row that contains only a single numeric table number
+        if _is_table_number_row(row_data):
+            logger.debug(
+                f"Found trailing table number row at {current_row}; ending subtable '{reference_number}'")
+            break
 
         # Check if we've reached the end marker '計'
         row_text = ' '.join([str(cell)
@@ -266,6 +283,7 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
             f"Successfully loaded sheet '{sheet_name}' with {len(df)} rows and {len(df.columns)} columns")
 
         subtables = []
+        reference_counts: Dict[str, int] = {}
         current_row = 0
 
         while current_row < len(df):
@@ -277,12 +295,14 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                 # This avoids false positives from reference codes in remarks columns
                 if col_idx <= 3 and find_reference_number_pattern(str(cell_value)):
                     reference_number = str(cell_value).strip()
-                    print(f"DEBUG: Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
+                    print(
+                        f"DEBUG: Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
                     logger.info(
                         f"Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
 
                     # Find column headers
-                    print(f"DEBUG: About to call find_column_headers_and_positions for {reference_number}")
+                    print(
+                        f"DEBUG: About to call find_column_headers_and_positions for {reference_number}")
                     header_row, column_positions = find_column_headers_and_positions(
                         df, current_row + 1)
                     print(
@@ -304,13 +324,18 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                         logger.debug(
                             f"Title extraction result for {reference_number}: {table_title}")
 
-                        # Extract data rows
+                        # Create unique reference number suffix (-2, -3, ...) when the same reference appears again
+                        base_ref = reference_number
+                        repeat_count = reference_counts.get(base_ref, 0)
+                        unique_ref = f"{base_ref}-{repeat_count+1}" if repeat_count >= 1 else base_ref
+
+                        # Extract data rows using unique reference
                         data_rows = extract_subtable_data(
-                            df, header_row, column_positions, reference_number)
+                            df, header_row, column_positions, unique_ref)
 
                         if data_rows:
                             subtable = {
-                                'reference_number': reference_number,
+                                'reference_number': unique_ref,
                                 'sheet_name': sheet_name,
                                 'start_row': current_row + 1,  # 1-indexed for Excel compatibility
                                 'header_row': header_row + 1,  # 1-indexed for Excel compatibility
@@ -326,6 +351,9 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                                     f"Extracted table title for {reference_number}: {table_title}")
 
                             subtables.append(subtable)
+                            # Update reference occurrence count
+                            reference_counts[base_ref] = reference_counts.get(
+                                base_ref, 0) + 1
                             logger.info(
                                 f"Extracted subtable '{reference_number}' with {len(data_rows)} data rows")
                         else:
@@ -338,7 +366,8 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                     else:
                         print(
                             f"DEBUG: Header row is None for {reference_number}")
-                        logger.warning(f"Header row is None for {reference_number} - skipping")
+                        logger.warning(
+                            f"Header row is None for {reference_number} - skipping")
                         break
             else:
                 current_row += 1

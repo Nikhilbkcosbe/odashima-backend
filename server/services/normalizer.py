@@ -70,8 +70,12 @@ class Normalizer:
         # Convert to string if not already
         text = str(text)
 
-        # Convert full-width to half-width
-        normalized = jaconv.z2h(text, kana=False, digit=True, ascii=True)
+        # 1) Convert half-width kana to full-width (so they are preserved)
+        #    e.g., ﾌﾟﾚｰﾄ -> プレート
+        normalized = jaconv.h2z(text, kana=True, digit=False, ascii=False)
+
+        # 2) Convert digits and ASCII to half-width for consistency
+        normalized = jaconv.z2h(normalized, kana=False, digit=True, ascii=True)
 
         # Convert to lowercase
         normalized = normalized.lower()
@@ -83,10 +87,10 @@ class Normalizer:
         # Remove spaces including full-width
         normalized = re.sub(r'[\s　\u3000]+', '', normalized)
 
-        # Keep alphanumeric, Japanese characters, and important technical symbols
+        # Keep alphanumeric, Japanese characters (including half-width kana), and important technical symbols
         # Preserve × (multiplication), ✕ (cross), φ (phi), * (asterisk), ~ (wave dash), commas, and other technical symbols
         normalized = re.sub(
-            r'[^\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAFφΦ×✕*～〜,，、。]', '', normalized)
+            r'[^\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF61-\uFF9FφΦ×✕*～〜,，、。]', '', normalized)
 
         # Remove common noise words/characters but preserve numerical suffixes
         noise_patterns = [
@@ -145,6 +149,28 @@ class Normalizer:
             return False  # Not significantly different - they're the same
         else:
             return True   # Significantly different - they're different items
+
+    def tokenize_item_name(self, text: str):
+        """
+        Tokenize normalized item name into simple character n-grams/word-like tokens
+        for inclusion checks. Keeps Japanese chars and alphanumerics.
+        """
+        norm = self._normalize_text(text)
+        if not norm:
+            return []
+        # Simple heuristic: split by digits transitions and common separators removed earlier
+        # additionally generate character 2-grams for robust containment checks
+        tokens = set()
+        # Add sliding 2-grams
+        for i in range(len(norm) - 1):
+            tokens.add(norm[i:i+2])
+        # Add longer chunks by splitting on numbers boundaries
+        parts = re.split(r'(\d+)', norm)
+        for p in parts:
+            p = p.strip()
+            if len(p) >= 2:
+                tokens.add(p)
+        return list(tokens)
 
     def calculate_similarity_score(self, key1: str, key2: str) -> float:
         """

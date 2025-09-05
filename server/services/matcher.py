@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Dict, Tuple
 from rapidfuzz import process, fuzz
 from ..schemas.tender import TenderItem, SubtableItem, ComparisonResult, ComparisonSummary, SubtableComparisonResult
@@ -20,40 +21,126 @@ class Matcher:
         Priority: Items in PDF that are not found in Excel.
         """
         logger.info(
-            f"Starting comparison: {len(pdf_items)} PDF items vs {len(excel_items)} Excel items")
+            f"Starting comparison (index-based): {len(pdf_items)} PDF items vs {len(excel_items)} Excel items")
 
-        # Normalize all items for comparison
-        pdf_normalized = self._normalize_items(pdf_items, "PDF")
-        excel_normalized = self._normalize_items(excel_items, "Excel")
+        # Index-based 1-to-1 comparison
+        results: List[ComparisonResult] = []
+        max_len = max(len(pdf_items), len(excel_items))
 
-        logger.info(
-            f"Normalized: {len(pdf_normalized)} PDF items, {len(excel_normalized)} Excel items")
+        for idx in range(max_len):
+            pdf_item = pdf_items[idx] if idx < len(pdf_items) else None
+            excel_item = excel_items[idx] if idx < len(excel_items) else None
 
-        # Compare items iteratively
-        results = []
-        matched_excel_keys = set()
+            if pdf_item and excel_item:
+                # Name comparison categories
+                pdf_name = self.normalizer.normalize_item(pdf_item.item_key)
+                excel_name = self.normalizer.normalize_item(
+                    excel_item.item_key)
+                pdf_tokens = [
+                    t for t in self.normalizer.tokenize_item_name(pdf_item.item_key)]
 
-        # Process each PDF item to find mismatches and missing items
-        for pdf_idx, (pdf_key, pdf_item) in enumerate(pdf_normalized.items()):
-            logger.debug(
-                f"Processing PDF item {pdf_idx + 1}/{len(pdf_normalized)}: {pdf_key[:50]}...")
+                exact_name_match = (pdf_name == excel_name)
+                all_tokens_in_excel = all(
+                    t in excel_name for t in pdf_tokens if t)
+                any_overlap = any((t and t in excel_name) for t in pdf_tokens)
 
-            comparison_result = self._compare_single_pdf_item(
-                pdf_key, pdf_item, excel_normalized, matched_excel_keys
-            )
+                # Quantity rules with blanks
+                quantity_diff = (excel_item.quantity or 0) - \
+                    (pdf_item.quantity or 0)
+                pdf_qty_raw = (pdf_item.raw_fields.get('数量') if hasattr(
+                    pdf_item, 'raw_fields') and isinstance(pdf_item.raw_fields, dict) else None)
+                excel_qty_raw = (excel_item.raw_fields.get('数量') if hasattr(
+                    excel_item, 'raw_fields') and isinstance(excel_item.raw_fields, dict) else None)
+                pdf_qty_blank = (pdf_qty_raw is None) or (
+                    str(pdf_qty_raw).strip() == '')
+                excel_qty_blank = (excel_qty_raw is None) or (
+                    str(excel_qty_raw).strip() == '')
+                if pdf_qty_blank and excel_qty_blank:
+                    has_quantity_mismatch = True
+                elif pdf_qty_blank and not excel_qty_blank:
+                    has_quantity_mismatch = False
+                else:
+                    has_quantity_mismatch = abs(quantity_diff) >= 0.001
 
-            results.append(comparison_result)
+                # Unit comparison
+                pdf_unit = self._normalize_unit(pdf_item.unit)
+                excel_unit = self._normalize_unit(excel_item.unit)
+                has_unit_mismatch = pdf_unit != excel_unit
 
-            # Track which Excel items have been matched
-            if comparison_result.excel_item and comparison_result.status in ["OK", "QUANTITY_MISMATCH"]:
-                excel_normalized_key = self.normalizer.normalize_item(
-                    comparison_result.excel_item.item_key)
-                matched_excel_keys.add(excel_normalized_key)
-
-        # Find extra items in Excel (not requested but included for completeness)
-        extra_excel_results = self._find_extra_excel_items(
-            excel_normalized, matched_excel_keys)
-        results.extend(extra_excel_results)
+                # Decide status by priority
+                if not exact_name_match and not any_overlap:
+                    # No overlap at all => MISSING for this position, but attach excel_item for context
+                    results.append(ComparisonResult(
+                        status="MISSING",
+                        pdf_item=pdf_item,
+                        excel_item=excel_item,
+                        match_confidence=0.0,
+                        quantity_difference=None,
+                        unit_mismatch=None,
+                        type="Main Table"
+                    ))
+                elif has_quantity_mismatch:
+                    results.append(ComparisonResult(
+                        status="QUANTITY_MISMATCH",
+                        pdf_item=pdf_item,
+                        excel_item=excel_item,
+                        match_confidence=1.0 if exact_name_match else 0.0,
+                        quantity_difference=quantity_diff,
+                        unit_mismatch=has_unit_mismatch,
+                        type="Main Table"
+                    ))
+                elif has_unit_mismatch:
+                    results.append(ComparisonResult(
+                        status="UNIT_MISMATCH",
+                        pdf_item=pdf_item,
+                        excel_item=excel_item,
+                        match_confidence=1.0 if exact_name_match else 0.0,
+                        quantity_difference=None,
+                        unit_mismatch=True,
+                        type="Main Table"
+                    ))
+                elif not exact_name_match:
+                    # Name mismatch categories 2 or 3
+                    results.append(ComparisonResult(
+                        status="NAME_MISMATCH",
+                        pdf_item=pdf_item,
+                        excel_item=excel_item,
+                        match_confidence=0.0,
+                        quantity_difference=None,
+                        unit_mismatch=None,
+                        type="Main Table"
+                    ))
+                else:
+                    results.append(ComparisonResult(
+                        status="OK",
+                        pdf_item=pdf_item,
+                        excel_item=excel_item,
+                        match_confidence=1.0,
+                        quantity_difference=None,
+                        unit_mismatch=False,
+                        type="Main Table"
+                    ))
+            elif pdf_item and not excel_item:
+                # Excel ran out of items
+                results.append(ComparisonResult(
+                    status="MISSING",
+                    pdf_item=pdf_item,
+                    excel_item=None,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Main Table"
+                ))
+            elif excel_item and not pdf_item:
+                results.append(ComparisonResult(
+                    status="EXTRA",
+                    pdf_item=None,
+                    excel_item=excel_item,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Main Table"
+                ))
 
         # Generate summary focusing on mismatches and missing items
         summary = self._generate_summary(results)
@@ -65,78 +152,205 @@ class Matcher:
 
     def compare_subtable_items(self, pdf_subtables: List[SubtableItem], excel_subtables: List[SubtableItem]) -> List[SubtableComparisonResult]:
         """
-        Compare subtable items between PDF and Excel, focusing on mismatches and missing items.
-        ENHANCED: Uses normalization for better matching (similar to main table logic).
+        Category-based subtable comparison within each reference (no index alignment):
+        - Exact name match -> apply quantity/unit rules
+        - All tokens from PDF present in an Excel name -> NAME_MISMATCH
+        - Some token overlap -> NAME_MISMATCH
+        - No overlap in ref -> MISSING
+        Also emit EXTRA for unmatched Excel items per reference.
         """
-        # ENHANCED: Normalize keys for matching using the normalizer
-        def make_key(item):
-            # Normalize item name using the normalizer
-            normalized_item_key = self.normalizer.normalize_item(
-                item.item_key) if item.item_key else ''
+        # Group by normalized reference number
+        def norm_ref(ref: str) -> str:
+            if not ref:
+                return ''
+            # Normalize spaces and common width differences
+            normalized = ref.replace(' ', '').replace('　', '')
+            # If Excel repeated-reference suffixes like "-2", "-3" were added, strip them for matching
+            normalized = re.sub(r"-\d+$", "", normalized)
+            return normalized
 
-            # Normalize reference number (handle spacing issues like "単 1号" vs "単1号")
-            normalized_ref = item.reference_number.strip().replace(
-                ' ', '').replace('　', '') if item.reference_number else ''
+        from collections import defaultdict
+        pdf_by_ref = defaultdict(list)
+        excel_by_ref = defaultdict(list)
+        for item in pdf_subtables:
+            pdf_by_ref[norm_ref(
+                getattr(item, 'reference_number', '')).strip()].append(item)
+        for item in excel_subtables:
+            excel_by_ref[norm_ref(
+                getattr(item, 'reference_number', '')).strip()].append(item)
 
-            return (normalized_item_key, normalized_ref)
+        all_refs = set(pdf_by_ref.keys()) | set(excel_by_ref.keys())
+        results: List[SubtableComparisonResult] = []
 
-        pdf_dict = {make_key(item): item for item in pdf_subtables}
-        excel_dict = {make_key(item): item for item in excel_subtables}
+        for ref in all_refs:
+            pdf_list = pdf_by_ref.get(ref, [])
+            excel_list = excel_by_ref.get(ref, [])
 
-        results = []
-        matched_excel_keys = set()
+            matched_excel_indices = set()
 
-        # Compare PDF subtables to Excel subtables
-        for key, pdf_item in pdf_dict.items():
-            if key in excel_dict:
-                excel_item = excel_dict[key]
-                # Compare quantity and unit
-                quantity_diff = (excel_item.quantity or 0) - \
-                    (pdf_item.quantity or 0)
-                has_quantity_mismatch = abs(quantity_diff) >= 0.001
-                # FIXED: Use normalized unit comparison to handle full-width vs half-width characters
-                pdf_unit = self._normalize_unit(pdf_item.unit)
-                excel_unit = self._normalize_unit(excel_item.unit)
-                has_unit_mismatch = pdf_unit != excel_unit
-                if has_quantity_mismatch:
-                    status = "QUANTITY_MISMATCH"
-                elif has_unit_mismatch:
-                    status = "UNIT_MISMATCH"
+            for pdf_item in pdf_list:
+                pdf_name = self.normalizer.normalize_item(pdf_item.item_key)
+                pdf_tokens = [
+                    t for t in self.normalizer.tokenize_item_name(pdf_item.item_key)]
+
+                # Exact match within same ref
+                exact_idx = None
+                for i, ex in enumerate(excel_list):
+                    if i in matched_excel_indices:
+                        continue
+                    if self.normalizer.normalize_item(ex.item_key) == pdf_name:
+                        exact_idx = i
+                        break
+
+                if exact_idx is not None:
+                    ex = excel_list[exact_idx]
+                    matched_excel_indices.add(exact_idx)
+                    # Quantity with blank rules
+                    quantity_diff = (ex.quantity or 0) - \
+                        (pdf_item.quantity or 0)
+                    pdf_qty_raw = (pdf_item.raw_fields.get('数量') if hasattr(
+                        pdf_item, 'raw_fields') and isinstance(pdf_item.raw_fields, dict) else None)
+                    excel_qty_raw = (ex.raw_fields.get('数量') if hasattr(
+                        ex, 'raw_fields') and isinstance(ex.raw_fields, dict) else None)
+                    pdf_qty_blank = (pdf_qty_raw is None) or (
+                        str(pdf_qty_raw).strip() == '')
+                    excel_qty_blank = (excel_qty_raw is None) or (
+                        str(excel_qty_raw).strip() == '')
+                    if pdf_qty_blank and excel_qty_blank:
+                        has_quantity_mismatch = True
+                    elif pdf_qty_blank and not excel_qty_blank:
+                        has_quantity_mismatch = False
+                    else:
+                        has_quantity_mismatch = abs(quantity_diff) >= 0.001
+                    pdf_unit = self._normalize_unit(pdf_item.unit)
+                    excel_unit = self._normalize_unit(ex.unit)
+                    has_unit_mismatch = pdf_unit != excel_unit
+
+                    if has_quantity_mismatch:
+                        results.append(SubtableComparisonResult(status="QUANTITY_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=1.0, quantity_difference=quantity_diff, unit_mismatch=has_unit_mismatch, type="Sub Table"))
+                    elif has_unit_mismatch:
+                        results.append(SubtableComparisonResult(status="UNIT_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=1.0, quantity_difference=None, unit_mismatch=True, type="Sub Table"))
+                    else:
+                        results.append(SubtableComparisonResult(status="OK", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=1.0, quantity_difference=None, unit_mismatch=False, type="Sub Table"))
+                    continue
+
+                # Category 2: all tokens present in some Excel name
+                cat2_idx = None
+                for i, ex in enumerate(excel_list):
+                    if i in matched_excel_indices:
+                        continue
+                    ex_name = self.normalizer.normalize_item(ex.item_key)
+                    if all(t in ex_name for t in pdf_tokens if t):
+                        cat2_idx = i
+                        break
+
+                if cat2_idx is not None:
+                    ex = excel_list[cat2_idx]
+                    matched_excel_indices.add(cat2_idx)
+                    # Promote to quantity/unit mismatch if applicable; otherwise name mismatch
+                    quantity_diff = (ex.quantity or 0) - \
+                        (pdf_item.quantity or 0)
+                    pdf_qty_raw = (pdf_item.raw_fields.get('数量') if hasattr(
+                        pdf_item, 'raw_fields') and isinstance(pdf_item.raw_fields, dict) else None)
+                    excel_qty_raw = (ex.raw_fields.get('数量') if hasattr(
+                        ex, 'raw_fields') and isinstance(ex.raw_fields, dict) else None)
+                    pdf_qty_blank = (pdf_qty_raw is None) or (
+                        str(pdf_qty_raw).strip() == '')
+                    excel_qty_blank = (excel_qty_raw is None) or (
+                        str(excel_qty_raw).strip() == '')
+                    if pdf_qty_blank and excel_qty_blank:
+                        has_quantity_mismatch = True
+                    elif pdf_qty_blank and not excel_qty_blank:
+                        has_quantity_mismatch = False
+                    else:
+                        has_quantity_mismatch = abs(quantity_diff) >= 0.001
+                    pdf_unit = self._normalize_unit(pdf_item.unit)
+                    excel_unit = self._normalize_unit(ex.unit)
+                    has_unit_mismatch = pdf_unit != excel_unit
+                    if has_quantity_mismatch:
+                        results.append(SubtableComparisonResult(status="QUANTITY_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=0.0, quantity_difference=quantity_diff, unit_mismatch=has_unit_mismatch, type="Sub Table"))
+                    elif has_unit_mismatch:
+                        results.append(SubtableComparisonResult(status="UNIT_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=0.0, quantity_difference=None, unit_mismatch=True, type="Sub Table"))
+                    else:
+                        results.append(SubtableComparisonResult(status="NAME_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=0.0, quantity_difference=None, unit_mismatch=None, type="Sub Table"))
+                    continue
+
+                # Category 3: any token overlap
+                cat3_idx = None
+                for i, ex in enumerate(excel_list):
+                    if i in matched_excel_indices:
+                        continue
+                    ex_name = self.normalizer.normalize_item(ex.item_key)
+                    if any((t and t in ex_name) for t in pdf_tokens):
+                        cat3_idx = i
+                        break
+
+                if cat3_idx is not None:
+                    ex = excel_list[cat3_idx]
+                    matched_excel_indices.add(cat3_idx)
+                    # Promote to quantity/unit mismatch if applicable; otherwise name mismatch
+                    quantity_diff = (ex.quantity or 0) - \
+                        (pdf_item.quantity or 0)
+                    pdf_qty_raw = (pdf_item.raw_fields.get('数量') if hasattr(
+                        pdf_item, 'raw_fields') and isinstance(pdf_item.raw_fields, dict) else None)
+                    excel_qty_raw = (ex.raw_fields.get('数量') if hasattr(
+                        ex, 'raw_fields') and isinstance(ex.raw_fields, dict) else None)
+                    pdf_qty_blank = (pdf_qty_raw is None) or (
+                        str(pdf_qty_raw).strip() == '')
+                    excel_qty_blank = (excel_qty_raw is None) or (
+                        str(excel_qty_raw).strip() == '')
+                    if pdf_qty_blank and excel_qty_blank:
+                        has_quantity_mismatch = True
+                    elif pdf_qty_blank and not excel_qty_blank:
+                        has_quantity_mismatch = False
+                    else:
+                        has_quantity_mismatch = abs(quantity_diff) >= 0.001
+                    pdf_unit = self._normalize_unit(pdf_item.unit)
+                    excel_unit = self._normalize_unit(ex.unit)
+                    has_unit_mismatch = pdf_unit != excel_unit
+                    if has_quantity_mismatch:
+                        results.append(SubtableComparisonResult(status="QUANTITY_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=0.0, quantity_difference=quantity_diff, unit_mismatch=has_unit_mismatch, type="Sub Table"))
+                    elif has_unit_mismatch:
+                        results.append(SubtableComparisonResult(status="UNIT_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=0.0, quantity_difference=None, unit_mismatch=True, type="Sub Table"))
+                    else:
+                        results.append(SubtableComparisonResult(status="NAME_MISMATCH", pdf_item=pdf_item, excel_item=ex,
+                                       match_confidence=0.0, quantity_difference=None, unit_mismatch=None, type="Sub Table"))
+                    continue
+
+                # No overlap: attach best-effort Excel candidate from same reference for context
+                candidate = None
+                try:
+                    pdf_idx_in_ref = pdf_list.index(pdf_item)
+                except ValueError:
+                    pdf_idx_in_ref = -1
+
+                # Prefer same-index excel if available and not already matched
+                if 0 <= pdf_idx_in_ref < len(excel_list) and pdf_idx_in_ref not in matched_excel_indices:
+                    candidate = excel_list[pdf_idx_in_ref]
                 else:
-                    status = "OK"
-                results.append(SubtableComparisonResult(
-                    status=status,
-                    pdf_item=pdf_item,
-                    excel_item=excel_item,
-                    match_confidence=1.0,
-                    quantity_difference=quantity_diff if has_quantity_mismatch else None,
-                    unit_mismatch=has_unit_mismatch if has_unit_mismatch else None,
-                    type="Sub Table"
-                ))
-                matched_excel_keys.add(key)
-            else:
-                # Missing in Excel
-                results.append(SubtableComparisonResult(
-                    status="MISSING",
-                    pdf_item=pdf_item,
-                    excel_item=None,
-                    match_confidence=0.0,
-                    quantity_difference=None,
-                    unit_mismatch=None,
-                    type="Sub Table"
-                ))
-        # Find extra items in Excel
-        for key, excel_item in excel_dict.items():
-            if key not in matched_excel_keys:
-                results.append(SubtableComparisonResult(
-                    status="EXTRA",
-                    pdf_item=None,
-                    excel_item=excel_item,
-                    match_confidence=0.0,
-                    quantity_difference=None,
-                    unit_mismatch=None,
-                    type="Sub Table"
-                ))
+                    # Otherwise, attach first unmatched excel in this reference (if any)
+                    for i, ex in enumerate(excel_list):
+                        if i not in matched_excel_indices:
+                            candidate = ex
+                            break
+
+                results.append(SubtableComparisonResult(status="MISSING", pdf_item=pdf_item, excel_item=candidate,
+                               match_confidence=0.0, quantity_difference=None, unit_mismatch=None, type="Sub Table"))
+
+            # EXTRA for unmatched excel items
+            for i, ex in enumerate(excel_list):
+                if i not in matched_excel_indices:
+                    results.append(SubtableComparisonResult(status="EXTRA", pdf_item=None, excel_item=ex,
+                                   match_confidence=0.0, quantity_difference=None, unit_mismatch=None, type="Sub Table"))
+
         return results
 
     def _normalize_items(self, items: List[TenderItem], source: str) -> Dict[str, TenderItem]:
@@ -173,7 +387,7 @@ class Matcher:
         """
         Compare a single PDF item against all Excel items.
         """
-        # Try exact match first
+        # Try exact match first (Category 1)
         if pdf_key in excel_normalized:
             excel_item = excel_normalized[pdf_key]
             return self._create_comparison_result(pdf_item, excel_item, 1.0, "EXACT_MATCH")
@@ -187,12 +401,57 @@ class Matcher:
             match_type = "FUZZY_MATCH" if confidence < 1.0 else "EXACT_MATCH"
             return self._create_comparison_result(pdf_item, excel_item, confidence, match_type)
 
-        # No match found - this is a missing item
-        logger.info(f"Missing item in Excel: {pdf_item.item_key}")
+        # New policy: do not emit MISSING; classify by name match category instead
+        # Category 2: all words/characters from PDF present in some Excel item name
+        pdf_tokens = [
+            t for t in self.normalizer.tokenize_item_name(pdf_item.item_key)]
+        for excel_key, excel_item in excel_normalized.items():
+            excel_name = self.normalizer.normalize_item(excel_item.item_key)
+            if all(t in excel_name for t in pdf_tokens if t):
+                # Treat as name mismatch, not missing
+                return ComparisonResult(
+                    status="NAME_MISMATCH",
+                    pdf_item=pdf_item,
+                    excel_item=excel_item,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Main Table"
+                )
+
+        # Category 3: some substring or word overlap between PDF and Excel item names
+        for excel_key, excel_item in excel_normalized.items():
+            excel_name = self.normalizer.normalize_item(excel_item.item_key)
+            if any((t and t in excel_name) for t in pdf_tokens):
+                return ComparisonResult(
+                    status="NAME_MISMATCH",
+                    pdf_item=pdf_item,
+                    excel_item=excel_item,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Main Table"
+                )
+
+        # If no overlap found at all, treat as MISSING per requirement
+        logger.info("Missing item in Excel (no name overlap): %s",
+                    pdf_item.item_key)
+        # Attach a best-effort Excel candidate (closest by fuzzy without threshold) for context
+        best_candidate = None
+        best_score = -1
+        try:
+            for excel_key, excel_item in excel_normalized.items():
+                score = fuzz.ratio(pdf_key, excel_key)
+                if score > best_score:
+                    best_score = score
+                    best_candidate = excel_item
+        except Exception:
+            best_candidate = None
+
         return ComparisonResult(
             status="MISSING",
             pdf_item=pdf_item,
-            excel_item=None,
+            excel_item=best_candidate,
             match_confidence=0.0,
             quantity_difference=None,
             unit_mismatch=None,
@@ -310,10 +569,23 @@ class Matcher:
         """
         Create a comparison result for matched items, checking for quantity and unit differences.
         """
-        # Check quantity difference
+        # Check quantity difference with blank rules
         quantity_tolerance = 0.001
-        quantity_diff = excel_item.quantity - pdf_item.quantity
-        has_quantity_mismatch = abs(quantity_diff) >= quantity_tolerance
+        quantity_diff = (excel_item.quantity or 0) - (pdf_item.quantity or 0)
+        pdf_qty_raw = (pdf_item.raw_fields.get('数量') if hasattr(
+            pdf_item, 'raw_fields') and isinstance(pdf_item.raw_fields, dict) else None)
+        excel_qty_raw = (excel_item.raw_fields.get('数量') if hasattr(
+            excel_item, 'raw_fields') and isinstance(excel_item.raw_fields, dict) else None)
+        pdf_qty_blank = (pdf_qty_raw is None) or (
+            str(pdf_qty_raw).strip() == '')
+        excel_qty_blank = (excel_qty_raw is None) or (
+            str(excel_qty_raw).strip() == '')
+        if pdf_qty_blank and excel_qty_blank:
+            has_quantity_mismatch = True
+        elif pdf_qty_blank and not excel_qty_blank:
+            has_quantity_mismatch = False
+        else:
+            has_quantity_mismatch = abs(quantity_diff) >= quantity_tolerance
 
         # Check unit difference
         pdf_unit = self._normalize_unit(pdf_item.unit)
@@ -385,6 +657,7 @@ class Matcher:
             1 for r in results if r.status == "QUANTITY_MISMATCH")
         unit_mismatches = sum(
             1 for r in results if r.status == "UNIT_MISMATCH")
+        # Count genuine MISSING entries (main-table policy now allows missing if no overlap)
         missing_items = sum(1 for r in results if r.status == "MISSING")
         extra_items = sum(1 for r in results if r.status == "EXTRA")
 

@@ -13,6 +13,10 @@ class TenderItem(BaseModel):
                     "Excel"] = Field(..., description="Source document type")
     page_number: Optional[int] = Field(
         None, description="Page number where the item was found (for PDF items)")
+    logical_line_number: Optional[int] = Field(
+        None, description="Logical line index within the table (for Excel main)")
+    table_number: Optional[str] = Field(
+        None, description="Detected table number at the end of the table (for Excel main)")
 
 
 class SubtableItem(BaseModel):
@@ -32,10 +36,12 @@ class SubtableItem(BaseModel):
         None, description="Excel sheet name where the item was found (for Excel items)")
     table_title: Optional[Dict[str, str]] = Field(
         None, description="Table title information with item_name, unit, and unit_quantity")
+    logical_line_number: Optional[int] = Field(
+        None, description="Logical item index per reference subtable (row-spanning aware)")
 
 
 class ComparisonResult(BaseModel):
-    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "MISSING",
+    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "NAME_MISMATCH", "MISSING",
                     "EXTRA"] = Field(..., description="Comparison status")
     pdf_item: Optional[TenderItem] = Field(
         None, description="PDF item if present")
@@ -78,7 +84,7 @@ class SubtableComparisonSummary(BaseModel):
 
 
 class SubtableComparisonResult(BaseModel):
-    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "MISSING",
+    status: Literal["OK", "QUANTITY_MISMATCH", "UNIT_MISMATCH", "NAME_MISMATCH", "MISSING",
                     "EXTRA"] = Field(..., description="Comparison status for subtable")
     pdf_item: Optional[SubtableItem] = Field(
         None, description="PDF subtable item if present")
