@@ -622,6 +622,74 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         subtable_unit_mismatches = [
             r for r in subtable_results if r.status == 'UNIT_MISMATCH']
 
+        # Main-table name mismatches - Category 2 (all tokens present) and Category 3 (some overlap)
+        main_name_mismatches = []
+        normalizer = Normalizer()
+        for r in (main_summary.results or []):
+            if r.status == 'NAME_MISMATCH' and r.pdf_item is not None and r.excel_item is not None and (r.type == 'Main Table' or not hasattr(r, 'type')):
+                pdf_tokens = [t for t in normalizer.tokenize_item_name(
+                    r.pdf_item.item_key)]
+                excel_name = normalizer.normalize_item(r.excel_item.item_key)
+                is_cat2 = all(t in excel_name for t in pdf_tokens if t)
+                is_cat3 = any((t and t in excel_name)
+                              for t in pdf_tokens) and not is_cat2
+                if is_cat2 or is_cat3:
+                    main_name_mismatches.append({
+                        "pdf_item_name": r.pdf_item.item_key,
+                        "excel_item_name": r.excel_item.item_key,
+                        "category": 2 if is_cat2 else 3,
+                        "pdf_item": {
+                            "item_key": r.pdf_item.item_key,
+                            "page_number": getattr(r.pdf_item, 'page_number', None)
+                        },
+                        "excel_item": {
+                            "item_key": r.excel_item.item_key,
+                            "table_number": getattr(r.excel_item, 'table_number', None),
+                            "logical_line_number": getattr(r.excel_item, 'logical_line_number', None)
+                        },
+                        "type": "Main Table"
+                    })
+
+        # Subtable name mismatches - Category 2 (all tokens present) and Category 3 (some overlap)
+        subtable_name_mismatches = []
+        for r in subtable_results:
+            if r.status == 'NAME_MISMATCH' and r.pdf_item is not None and r.excel_item is not None:
+                pdf_tokens = [t for t in normalizer.tokenize_item_name(
+                    r.pdf_item.item_key)]
+                excel_name = normalizer.normalize_item(r.excel_item.item_key)
+                is_cat2 = all(t in excel_name for t in pdf_tokens if t)
+                is_cat3 = any((t and t in excel_name)
+                              for t in pdf_tokens) and not is_cat2
+                if is_cat2 or is_cat3:
+                    subtable_name_mismatches.append({
+                        # Convenience duplicates for frontend debugging/inspection
+                        "pdf_item_name": r.pdf_item.item_key,
+                        "excel_item_name": r.excel_item.item_key,
+                        "category": 2 if is_cat2 else 3,
+                        "pdf_item": {
+                            "item_key": r.pdf_item.item_key,
+                            "page_number": r.pdf_item.page_number,
+                            "reference_number": getattr(r.pdf_item, 'reference_number', None)
+                        },
+                        "excel_item": {
+                            "item_key": r.excel_item.item_key,
+                            "reference_number": getattr(r.excel_item, 'reference_number', None),
+                            "logical_line_number": getattr(r.excel_item, 'logical_line_number', None)
+                        },
+                        "type": "Sub Table"
+                    })
+
+        # Log a few samples to verify PDF/Excel names differ as expected
+        try:
+            for sample in subtable_name_mismatches[:3]:
+                logger.info(
+                    "SUBTABLE NAME MISMATCH sample → PDF='%s' | Excel='%s'",
+                    sample.get('pdf_item', {}).get('item_key'),
+                    sample.get('excel_item', {}).get('item_key')
+                )
+        except Exception:
+            pass
+
         # Combine EXTRA items (Excel items not in PDF) for frontend display
         combined_extra_items = []
 
@@ -741,6 +809,14 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
             "quantity_mismatches": main_quantity_mismatches + subtable_quantity_mismatches,
             "unit_mismatches_count": len(main_unit_mismatches) + len(subtable_unit_mismatches),
             "unit_mismatches": main_unit_mismatches + subtable_unit_mismatches,
+
+            # Subtable Category-2/3 name mismatches (for dedicated UI table)
+            "subtable_name_mismatches_count": len(subtable_name_mismatches),
+            "subtable_name_mismatches": subtable_name_mismatches,
+
+            # Main-table Category-2/3 name mismatches (for main UI table)
+            "main_name_mismatches_count": len(main_name_mismatches),
+            "main_name_mismatches": main_name_mismatches,
 
             # DETAILED BREAKDOWN FOR SUMMARY CARDS
             "detailed_breakdown": {
