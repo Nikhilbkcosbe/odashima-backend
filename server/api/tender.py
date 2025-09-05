@@ -243,16 +243,18 @@ async def extract_spec_pdf(
                     except Exception:
                         pass
 
-        # Add estimate info as additional fields to the response
+        # Add estimate info as additional fields to the response (updated fields)
         response = {
             "sections": spec_response,
             "spec_filename": spec_pdf_file.filename,
             "estimate_filename": estimate_pdf_file.filename,
-            # Add estimate fields directly to the response
-            "省庁": estimate_info.get('省庁', 'Not Found'),
-            "年度": estimate_info.get('年度', 'Not Found'),
-            "経費工種": estimate_info.get('経費工種', 'Not Found'),
-            "施工地域工事場所": estimate_info.get('施工地域工事場所', 'Not Found'),
+            # New estimate fields
+            "工種区分": estimate_info.get('工種区分', 'Not Found'),
+            "工事中止日数": estimate_info.get('工事中止日数', 'Not Found'),
+            "単価地区": estimate_info.get('単価地区', 'Not Found'),
+            "単価使用年月": estimate_info.get('単価使用年月', 'Not Found'),
+            "歩掛適用年月": estimate_info.get('歩掛適用年月', 'Not Found'),
+            "総日数": estimate_info.get('総日数', 'Not Found'),
             # Add management fee data
             "management_fee_subtables": management_fee_data
         }

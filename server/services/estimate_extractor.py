@@ -52,16 +52,19 @@ class EstimateReferenceExtractor:
         return text.strip()
 
     def extract_estimate_info(self, page_index=1):
-        """Extract required information from the specified page of the estimate reference PDF"""
+        """Extract required information from the specified page of the estimate reference PDF.
+        Now extracts: 工種区分, 工事中止日数, 単価地区, 単価使用年月, 歩掛適用年月
+        """
         try:
             if len(self.pdf_pages) <= page_index:
                 logger.warning(
                     f"PDF has less than {page_index + 1} pages, cannot extract estimate info from page {page_index + 1}")
                 return {
-                    '省庁': 'Not Found',
-                    '年度': 'Not Found',
-                    '経費工種': 'Not Found',
-                    '施工地域工事場所': 'Not Found'
+                    '工種区分': 'Not Found',
+                    '工事中止日数': 'Not Found',
+                    '単価地区': 'Not Found',
+                    '単価使用年月': 'Not Found',
+                    '歩掛適用年月': 'Not Found'
                 }
 
             # Get the specified page
@@ -71,195 +74,91 @@ class EstimateReferenceExtractor:
         except Exception as e:
             logger.error(f"Error extracting text from PDF page: {str(e)}")
             return {
-                '省庁': 'Not Found',
-                '年度': 'Not Found',
-                '経費工種': 'Not Found',
-                '施工地域工事場所': 'Not Found'
+                '工種区分': 'Not Found',
+                '工事中止日数': 'Not Found',
+                '単価地区': 'Not Found',
+                '単価使用年月': 'Not Found',
+                '歩掛適用年月': 'Not Found'
             }
 
-        logger.info(f"Extracted text from page {page_index + 1}: {page_text[:500]}...")
+        logger.info(
+            f"Extracted text from page {page_index + 1}: {page_text[:500]}...")
         logger.info(f"Full page text length: {len(page_text)}")
 
-        # Extract 省庁 from footer position (usually at the bottom of the page)
-        # Look for patterns that include "県" or "都" or "府" or "市"
-        shocho_patterns = [
-            r'([^\s]+[県都府市])',  # Any text ending with 県, 都, 府, 市
-            r'([^\s]+県[^\s]*)',    # Text containing 県
-            r'([^\s]+都[^\s]*)',    # Text containing 都
-            r'([^\s]+府[^\s]*)',    # Text containing 府
-            r'([^\s]+市[^\s]*)',    # Text containing 市
-        ]
+        def _normalize_digits(s: str) -> str:
+            if not s:
+                return s
+            trans = str.maketrans({'０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+                                   '５': '5', '６': '6', '７': '7', '８': '8', '９': '9'})
+            return s.translate(trans)
 
-        shocho = "Not Found"
-        for pattern in shocho_patterns:
-            matches = re.findall(pattern, page_text)
-            if matches:
-                # Take the last match (usually at the bottom/footer)
-                shocho = matches[-1]
+        # 工種区分: value immediately after the label
+        koushu_patterns = [
+            r'工\s*種\s*区\s*分\s*[:：]?\s*([^\s\n]+)',
+            r'工種区分[^\n]*?([^\s\n]+)'
+        ]
+        koushu = 'Not Found'
+        for pattern in koushu_patterns:
+            m = re.search(pattern, page_text)
+            if m and m.group(1):
+                koushu = m.group(1).strip()
                 break
 
-        # If still not found, try to extract from the end of the text (footer area)
-        if shocho == "Not Found":
-            # Get the last 1000 characters (footer area)
-            footer_text = page_text[-1000:] if len(
-                page_text) > 1000 else page_text
-            for pattern in shocho_patterns:
-                matches = re.findall(pattern, footer_text)
-                if matches:
-                    shocho = matches[-1]
-                    break
+        # 工事中止日数: capture '<n>日' (or '日間') and normalize to '<n>日'
+        chushi = 'Not Found'
+        m = re.search(
+            r'工\s*事\s*中\s*止\s*日\s*数[^\n]*?([0-9０-９]+)\s*日(?:\s*間)?', page_text)
+        if m and m.group(1):
+            chushi = _normalize_digits(m.group(1)) + '日'
 
-        # If still not found, try to extract from the very end (last 500 characters)
-        if shocho == "Not Found":
-            # Get the last 500 characters (very bottom of page)
-            bottom_text = page_text[-500:] if len(
-                page_text) > 500 else page_text
-            for pattern in shocho_patterns:
-                matches = re.findall(pattern, bottom_text)
-                if matches:
-                    shocho = matches[-1]
-                    break
+        # 単価地区
+        tanka_chiku = 'Not Found'
+        m = re.search(r'単\s*価\s*地\s*区\s*[:：]?\s*([^\s\n]+)', page_text)
+        if m and m.group(1):
+            tanka_chiku = m.group(1).strip()
 
-        # If still not found, try to look for common prefecture names
-        if shocho == "Not Found":
-            common_prefectures = [
-                r'(東京都)', r'(神奈川県)', r'(千葉県)', r'(埼玉県)', r'(茨城県)',
-                r'(栃木県)', r'(群馬県)', r'(山梨県)', r'(静岡県)', r'(愛知県)',
-                r'(三重県)', r'(滋賀県)', r'(京都府)', r'(大阪府)', r'(兵庫県)',
-                r'(奈良県)', r'(和歌山県)', r'(岐阜県)', r'(富山県)', r'(石川県)',
-                r'(福井県)', r'(新潟県)', r'(長野県)', r'(山形県)', r'(福島県)',
-                r'(宮城県)', r'(秋田県)', r'(青森県)', r'(岩手県)', r'(北海道)',
-            ]
-            for pattern in common_prefectures:
-                match = self._search(pattern, page_text)
-                if match != "Not Found":
-                    shocho = match
-                    break
+        # 単価使用年月: capture 'YYYY年 M月' allowing spaces and full-width digits
+        tanka_ym = 'Not Found'
+        m = re.search(
+            r'単\s*価\s*使\s*用\s*年\s*月\s*[:：]?\s*([0-9０-９]{4})年\s*([0-9０-９]{1,2})月', page_text)
+        if m and m.group(1) and m.group(2):
+            year = _normalize_digits(m.group(1))
+            month = _normalize_digits(m.group(2))
+            tanka_ym = f"{year}年 {month}月"
+        else:
+            m2 = re.search(
+                r'単\s*価\s*使\s*用\s*年\s*月\s*[:：]?\s*([^\s\n]+)', page_text)
+            if m2 and m2.group(1):
+                tanka_ym = m2.group(1).strip()
 
-                # Extract 年度 (Japanese era + number + 年度)
-        nendo_patterns = [
-            r'([令和平成昭和大正明治]\s*\d+\s*年度)',  # Full pattern with era
-            r'(\d+\s*年度)',                           # Just number + 年度
-            r'([令和平成昭和大正明治]\s*\d+)',         # Era + number
-            # Just number + 年度 (no spaces)
-            r'(\d+年度)',
-        ]
+        # 歩掛適用年月: capture 'YYYY年 M月' allowing spaces and full-width digits
+        hokake_ym = 'Not Found'
+        m = re.search(
+            r'歩\s*掛\s*適\s*用\s*年\s*月\s*[:：]?\s*([0-9０-９]{4})年\s*([0-9０-９]{1,2})月', page_text)
+        if m and m.group(1) and m.group(2):
+            year = _normalize_digits(m.group(1))
+            month = _normalize_digits(m.group(2))
+            hokake_ym = f"{year}年 {month}月"
+        else:
+            m2 = re.search(
+                r'歩\s*掛\s*適\s*用\s*年\s*月\s*[:：]?\s*([^\s\n]+)', page_text)
+            if m2 and m2.group(1):
+                hokake_ym = m2.group(1).strip()
 
-        nendo = "Not Found"
-        for pattern in nendo_patterns:
-            match = self._search(pattern, page_text)
-            if match != "Not Found":
-                nendo = match
-                break
-
-        # If still not found, try to extract from the beginning of the text (header area)
-        if nendo == "Not Found":
-            # Get the first 1000 characters (header area)
-            header_text = page_text[:1000] if len(
-                page_text) > 1000 else page_text
-            for pattern in nendo_patterns:
-                match = self._search(pattern, header_text)
-                if match != "Not Found":
-                    nendo = match
-                    break
-
-        # If still not found, try to extract from the very beginning (first 500 characters)
-        if nendo == "Not Found":
-            # Get the first 500 characters (very top of page)
-            top_text = page_text[:500] if len(page_text) > 500 else page_text
-            for pattern in nendo_patterns:
-                match = self._search(pattern, top_text)
-                if match != "Not Found":
-                    nendo = match
-                    break
-
-        # If still not found, try to look for common year patterns
-        if nendo == "Not Found":
-            # Look for any year pattern in the text
-            year_patterns = [
-                r'(令和\d+年度)', r'(平成\d+年度)', r'(昭和\d+年度)',
-                r'(令和\d+)', r'(平成\d+)', r'(昭和\d+)',
-                r'(\d+年度)', r'(\d+年)',
-            ]
-            for pattern in year_patterns:
-                match = self._search(pattern, page_text)
-                if match != "Not Found":
-                    nendo = match
-                    break
-
-                # Extract 経費工種 (comes after 工種区分)
-        # Look for the value in the 摘要 column after 工種区分
-        keihi_patterns = [
-            r'工種区分[^\n]*?([^\s\n]+)',  # After 工種区分, get the next word
-            r'工種区分\s*([^\s\n]+)',      # Directly after 工種区分, get next word
-            # After 工種区分, get text until space or end
-            r'工種区分[^\n]*?([^\n]+?)(?=\s|$)',
-        ]
-
-        keihi = "Not Found"
-        for pattern in keihi_patterns:
-            match = self._search(pattern, page_text)
-            if match != "Not Found":
-                # Clean up the extracted value - take only the first word/phrase
-                keihi = match.split()[0] if match else match
-                break
-
-        # If still not found, try to find 土木 or 橋梁 in the text
-        if keihi == "Not Found":
-            fallback_patterns = [
-                r'([^\s\n]*土木[^\s\n]*)',  # Look for 土木
-                r'([^\s\n]*橋梁[^\s\n]*)',  # Look for 橋梁
-            ]
-            for pattern in fallback_patterns:
-                match = self._search(pattern, page_text)
-                if match != "Not Found":
-                    keihi = match
-                    break
-
-                # Extract 施工地域工事場所 (comes after 工事名)
-        # Based on the actual text, it seems to be "一般国道107号水沢橋橋梁補修その２工事"
-        kouji_patterns = [
-            # After 工事名, get text until space or end
-            r'工\s*事\s*名[^\n]*?([^\n]+?)(?=\s|$)',
-            # Directly after 工事名, get next word
-            r'工\s*事\s*名\s*([^\s\n]+)',
-            # Pattern for highway construction (word boundary)
-            r'(一般国道\d+号[^\s\n]+工事)',
-            # Pattern for bridge construction (word boundary)
-            r'([^\s\n]*橋[^\s\n]*工事)',
-            # Highway number pattern (word boundary)
-            r'(一般国道\d+号[^\s\n]+)',
-            # Specific bridge name (word boundary)
-            r'([^\s\n]*水沢橋[^\s\n]*)',
-        ]
-
-        kouji = "Not Found"
-        for pattern in kouji_patterns:
-            match = self._search(pattern, page_text)
-            if match != "Not Found":
-                # Clean up the extracted value - take only the construction name
-                kouji = match.split()[0] if match else match
-                break
-
-        # If still not found, try to extract from the beginning of the text
-        if kouji == "Not Found":
-            # Look for the first occurrence of construction-related text
-            construction_patterns = [
-                r'(一般国道\d+号[^\s\n]+)',
-                r'([^\s\n]*橋[^\s\n]*工事)',
-                r'([^\s\n]*補修[^\s\n]*)',
-            ]
-            for pattern in construction_patterns:
-                match = self._search(pattern, page_text)
-                if match != "Not Found":
-                    kouji = match.split()[0] if match else match
-                    break
+        # 総日数: e.g., ３３５日間 (appears before table). Capture first occurrence on the page
+        total_days = 'Not Found'
+        m = re.search(r'([0-9０-９]+)\s*日\s*間', page_text)
+        if m and m.group(1):
+            # Preserve original width of digits
+            total_days = m.group(1) + '日間'
 
         result = {
-            '省庁': shocho,
-            '年度': nendo,
-            '経費工種': keihi,
-            '施工地域工事場所': kouji
+            '工種区分': koushu,
+            '工事中止日数': chushi,
+            '単価地区': tanka_chiku,
+            '単価使用年月': tanka_ym,
+            '歩掛適用年月': hokake_ym,
+            '総日数': total_days
         }
 
         logger.info(f"Extracted estimate info: {result}")

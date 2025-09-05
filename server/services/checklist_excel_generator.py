@@ -106,7 +106,7 @@ class ChecklistExcelGenerator:
         current_row += 2
 
     def _create_estimate_info_section(self, spec_result: Dict[str, Any]):
-        """Create the estimate information section."""
+        """Create the estimate information section (updated fields)."""
         current_row = self.worksheet.max_row + 1
 
         # Section header
@@ -117,12 +117,14 @@ class ChecklistExcelGenerator:
         self.worksheet.merge_cells(f'A{current_row}:H{current_row}')
         current_row += 1
 
-        # Estimate information fields
+        # Estimate information fields (updated)
         estimate_fields = [
-            ("省庁", spec_result.get('省庁', 'N/A')),
-            ("年度", spec_result.get('年度', 'N/A')),
-            ("経費工種", spec_result.get('経費工種', 'N/A')),
-            ("施工地域工事場所", spec_result.get('施工地域工事場所', 'N/A'))
+            ("工種区分", spec_result.get('工種区分', 'N/A')),
+            ("工事中止日数", spec_result.get('工事中止日数', 'N/A')),
+            ("単価地区", spec_result.get('単価地区', 'N/A')),
+            ("単価使用年月", spec_result.get('単価使用年月', 'N/A')),
+            ("歩掛適用年月", spec_result.get('歩掛適用年月', 'N/A')),
+            ("総日数", spec_result.get('総日数', 'N/A')),
         ]
 
         for field_name, field_value in estimate_fields:

@@ -319,30 +319,140 @@ class SpecFinalExtractor:
 
     def extract_dai8jou(self):
         results = {"交通誘導警備員": "Not Found"}
-        _, all_tables = self._get_content_for_article("第８条")
-        target_headers = ['配置場所', '配置員数', '編制', '総配置員数', '昼夜別', '交代要員の有無']
+        text, all_tables = self._get_content_for_article("第８条")
+
+        # Helper: normalize text by removing spaces/newlines and converting some variants
+        def normalize(s: str) -> str:
+            if s is None:
+                return ""
+            s = str(s)
+            s = s.replace('\n', '').replace(' ', '').replace('　', '')
+            s = s.replace('\t', '')
+            return s
+
+        # Expected header patterns (accept common variants)
+        header_keys = {
+            '配置場所': [r'配置場所', r'配置場所在'],
+            '配置員数': [r'配置員数'],
+            '編制': [r'編制', r'編成'],
+            '総配置員数': [r'総配置員数', r'総配置員數', r'総員数'],
+            '昼夜別': [r'昼夜別'],
+            '交代要員の有無': [r'交代要員の有無', r'交代要員.*有無']
+        }
+
+        def find_header_mapping(table_rows):
+            # Strict: header must be in first row and contain all 6 expected headers
+            if not table_rows or not table_rows[0]:
+                return None, {}
+            row = table_rows[0]
+            normalized_cells = [normalize(c) for c in row]
+            mapping = {}
+            for col_idx, cell in enumerate(normalized_cells):
+                for key, patterns in header_keys.items():
+                    if key in mapping:
+                        continue
+                    for pat in patterns:
+                        if re.fullmatch(pat, cell) or (pat in cell and len(cell) <= 10):
+                            mapping[key] = col_idx
+                            break
+            # Require all expected columns
+            if len(mapping) == 6:
+                return 0, mapping
+            return None, {}
+
         for table in all_tables:
             if not table or not table[0]:
                 continue
-            header_row_text = "".join(filter(None, table[0]))
-            if all(h in header_row_text for h in target_headers):
-                if len(table) > 1:
-                    data_row = table[1]
-                    if len(data_row) == len(target_headers):
-                        haichi_basho_raw = data_row[0] or ""
-                        rosenmei = ""
-                        if '\n' in haichi_basho_raw:
-                            rosenmei = haichi_basho_raw.split('\n')[1]
-                        extracted_data = {
-                            "路線名": rosenmei,
-                            "配置員数": (data_row[1] or "").strip(),
-                            "編制": (data_row[2] or "").strip(),
-                            "総配置員数": (data_row[3] or "").strip(),
-                            "昼夜別": (data_row[4] or "").strip(),
-                            "交代要員の有無": (data_row[5] or "").strip(),
-                        }
-                        results["交通誘導警備員"] = extracted_data
-                        break
+
+            header_idx, col_map = find_header_mapping(table)
+            if header_idx is None:
+                continue
+
+            # Safely get values by mapped columns
+            def get_col(row, key):
+                idx = col_map.get(key)
+                if idx is None or idx >= len(row):
+                    return ""
+                return (row[idx] or "").strip()
+
+            extracted_rows = []
+            last_values = {}
+            r = header_idx + 1
+            while r < len(table):
+                row = table[r]
+                if not row:
+                    r += 1
+                    continue
+                if not any(str(c).strip() for c in row):
+                    r += 1
+                    continue
+                # Guard against repeated header rows
+                norm_joined = normalize("".join([str(c or "") for c in row]))
+                if all(k in norm_joined for k in [normalize(k) for k in ['配置場所', '配置員数', '編', '総', '昼夜', '交代']]):
+                    r += 1
+                    continue
+
+                # Base values
+                values = {
+                    "配置場所": get_col(row, '配置場所'),
+                    "配置員数": get_col(row, '配置員数'),
+                    "編制": get_col(row, '編制') or get_col(row, '編成') if '編成' in header_keys else get_col(row, '編制'),
+                    "総配置員数": get_col(row, '総配置員数') or get_col(row, '総員数') if '総員数' in header_keys else get_col(row, '総配置員数'),
+                    "昼夜別": get_col(row, '昼夜別'),
+                    "交代要員の有無": get_col(row, '交代要員の有無'),
+                }
+                non_empty_keys = [
+                    k for k, v in values.items() if str(v).strip()]
+                # Merge with next row if current row only has 配置場所 and next has rest (rowspan split)
+                if non_empty_keys == ['配置場所'] and r + 1 < len(table):
+                    next_row = table[r + 1]
+                    if next_row and any(str(c).strip() for c in next_row):
+                        merged = dict(values)
+                        for k in ["配置員数", "編制", "総配置員数", "昼夜別", "交代要員の有無"]:
+                            nv = get_col(next_row, k)
+                            if nv:
+                                merged[k] = nv
+                        values = merged
+                        r += 1  # consume the next row
+
+                # Forward-fill empty values using last non-empty seen (handles vertical merges)
+                for k, v in values.items():
+                    if not str(v).strip() and k in last_values:
+                        values[k] = last_values[k]
+
+                haichi_basho_raw = values.get('配置場所', '')
+                rosenmei = ""
+                if '\n' in str(haichi_basho_raw):
+                    parts = str(haichi_basho_raw).split('\n')
+                    rosenmei = parts[1].strip() if len(
+                        parts) > 1 else parts[0].strip()
+                else:
+                    rosenmei = str(haichi_basho_raw).strip()
+
+                row_obj = {
+                    "配置場所": str(haichi_basho_raw).strip(),
+                    "路線名": rosenmei,
+                    "配置員数": values["配置員数"],
+                    "編制": values["編制"],
+                    "総配置員数": values["総配置員数"],
+                    "昼夜別": values["昼夜別"],
+                    "交代要員の有無": values["交代要員の有無"],
+                }
+
+                # Update last_values cache
+                for k, v in values.items():
+                    if str(v).strip():
+                        last_values[k] = v
+
+                if any(str(v).strip() for v in row_obj.values()):
+                    extracted_rows.append(row_obj)
+
+                r += 1
+
+            if extracted_rows:
+                results["交通誘導警備員"] = extracted_rows
+                break
+
         return results
 
     def extract_dai10jou(self):
