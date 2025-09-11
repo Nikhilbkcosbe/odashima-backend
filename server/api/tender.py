@@ -612,17 +612,26 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         main_quantity_mismatches = matcher.get_mismatched_items_only(
             pdf_items, excel_items)
 
-        # Get unit mismatches for main table items
-        main_unit_mismatches = matcher.get_unit_mismatched_items_only(
-            pdf_items, excel_items)
+        # Get unit mismatches for main table items (include unit diffs inside quantity mismatches)
+        main_unit_mismatches = [
+            r for r in main_summary.results
+            if (
+                r.status == 'UNIT_MISMATCH' or
+                (r.status == 'QUANTITY_MISMATCH' and getattr(
+                    r, 'unit_mismatch', False))
+            ) and (r.type == 'Main Table' or not hasattr(r, 'type'))
+        ]
 
         # For subtables, we need to use the comprehensive comparison
         subtable_results = matcher.compare_subtable_items(
             pdf_subtables, excel_subtables)
         subtable_quantity_mismatches = [
             r for r in subtable_results if r.status == 'QUANTITY_MISMATCH']
+        # Include unit diffs even when quantity also differs
         subtable_unit_mismatches = [
-            r for r in subtable_results if r.status == 'UNIT_MISMATCH']
+            r for r in subtable_results
+            if r.status == 'UNIT_MISMATCH' or (r.status == 'QUANTITY_MISMATCH' and getattr(r, 'unit_mismatch', False))
+        ]
 
         # Main-table name mismatches - Category 2 (all tokens present) and Category 3 (some overlap)
         main_name_mismatches = []
