@@ -627,6 +627,14 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
             pdf_subtables, excel_subtables)
         subtable_quantity_mismatches = [
             r for r in subtable_results if r.status == 'QUANTITY_MISMATCH']
+        # Ignore quantity mismatches for specific subtable item name
+        subtable_quantity_mismatches = [
+            r for r in subtable_quantity_mismatches
+            if not (
+                (r.pdf_item and r.pdf_item.item_key == '諸雑費(率+まるめ)') or
+                (r.excel_item and r.excel_item.item_key == '諸雑費(率+まるめ)')
+            )
+        ]
         # Include unit diffs even when quantity also differs
         subtable_unit_mismatches = [
             r for r in subtable_results
@@ -1661,6 +1669,14 @@ async def compare_tender_files_mismatches_only(
             pdf_subtables, excel_subtables)
         subtable_mismatches = [
             r for r in subtable_results if r.status == 'QUANTITY_MISMATCH']
+        # Ignore quantity mismatches for specific subtable item name
+        subtable_mismatches = [
+            r for r in subtable_mismatches
+            if not (
+                (r.pdf_item and r.pdf_item.item_key == '諸雑費(率+まるめ)') or
+                (r.excel_item and r.excel_item.item_key == '諸雑費(率+まるめ)')
+            )
+        ]
 
         # Format for frontend: add 'type' field
         quantity_mismatches = [

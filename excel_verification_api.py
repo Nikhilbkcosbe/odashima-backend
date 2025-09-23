@@ -751,42 +751,51 @@ class HierarchicalExcelExtractor:
         return json.dumps(root_items_dict, ensure_ascii=False, indent=2)
 
     def _verify_amount_calculations(self, hierarchical_items: List[HierarchicalItem]) -> List[HierarchicalItem]:
-        """Verify that root item amounts match the sum according to business rules"""
-        for item in hierarchical_items:
-            if item.level == 0:  # Root item
-                # Get actual amount from the item
+        """Verify amounts with state reset after each '工事費計'."""
+        def split_segments(items: List[HierarchicalItem]) -> List[List[HierarchicalItem]]:
+            segments: List[List[HierarchicalItem]] = []
+            current: List[HierarchicalItem] = []
+            for it in items:
+                current.append(it)
+                if it.level == 0 and it.item_name == "工事費計":
+                    segments.append(current)
+                    current = []
+            if current:
+                segments.append(current)
+            return segments
+
+        segments = split_segments(hierarchical_items)
+
+        for segment in segments:
+            for item in segment:
+                if item.level != 0:
+                    item.amount_verification = None
+                    continue
+
                 try:
                     actual_amount = float(item.amount.replace(
                         ',', '')) if item.amount else 0.0
                 except (ValueError, AttributeError):
                     actual_amount = 0.0
 
-                # Calculate expected amount based on business rules for specific items
                 if item.item_name == "純工事費":
-                    expected_amount = self._calculate_junkoji_amount(
-                        hierarchical_items)
+                    expected_amount = self._calculate_junkoji_amount(segment)
                 elif item.item_name == "工事原価":
                     expected_amount = self._calculate_koji_genka_amount(
-                        hierarchical_items)
+                        segment)
                 elif item.item_name == "工事価格":
                     expected_amount = self._calculate_koji_kakaku_amount(
-                        hierarchical_items)
+                        segment)
                 elif item.item_name == "消費税額及び地方消費税額":
-                    # No verification required for tax amount
                     expected_amount = actual_amount
                 elif item.item_name == "工事費計":
-                    expected_amount = self._calculate_koji_kei_amount(
-                        hierarchical_items)
+                    expected_amount = self._calculate_koji_kei_amount(segment)
                 elif item.item_name == "直接工事費":
-                    expected_amount = self._calculate_chokkoji_amount(
-                        hierarchical_items)
+                    expected_amount = self._calculate_chokkoji_amount(segment)
                 elif not item.children:
-                    # For items without children (and not business logic items), we still need to verify them
-                    # They should match their actual amount (no calculation needed)
                     expected_amount = actual_amount
                     is_matched = True
                     difference = 0.0
-
                     item.amount_verification = {
                         'is_matched': is_matched,
                         'expected_amount': expected_amount,
@@ -797,14 +806,10 @@ class HierarchicalExcelExtractor:
                         f"Verification for '{item.item_name}' (no children): Expected=Actual={actual_amount}")
                     continue
                 else:
-                    # For other items, use standard children sum calculation
                     expected_amount = self._calculate_children_sum(item)
 
-                # Check if amounts match (with small tolerance for floating point precision)
-                tolerance = 0.01  # 1 cent tolerance
+                tolerance = 0.01
                 is_matched = abs(expected_amount - actual_amount) <= tolerance
-
-                # Add verification fields to the item
                 item.amount_verification = {
                     'is_matched': is_matched,
                     'expected_amount': expected_amount,
@@ -816,9 +821,6 @@ class HierarchicalExcelExtractor:
                             f"Expected: {expected_amount:,.0f}, "
                             f"Actual: {actual_amount:,.0f}, "
                             f"Matched: {is_matched}")
-            else:
-                # For non-root items, set verification to None
-                item.amount_verification = None
 
         return hierarchical_items
 
@@ -1385,12 +1387,15 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
         for item in json_data:
             if item.get('amount_verification') and not item['amount_verification']['is_matched']:
                 business_logic_mismatches.append({
-                    'path': item['item_name'],
+                    # 'path' intentionally omitted for frontend removal of パス column
                     'level': item['level'],
                     'amount': item['amount_verification']['actual_amount'],
                     'children_sum': item['amount_verification']['expected_amount'],
                     'difference': item['amount_verification']['difference'],
-                    'item_name': item['item_name']
+                    'item_name': item['item_name'],
+                    'table_number': item.get('table_number', None),
+                    'reference_number': item.get('reference_number', None),
+                    'is_main_table': item.get('is_main_table', True)
                 })
 
         # Collect calculation mismatches (単価 × 数量 = 金額)
@@ -1426,18 +1431,33 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
         for root_item in json_data:
             collect_calculation_mismatches(root_item)
 
-        # Combine mismatches from both verification methods and deduplicate
+        # Combine mismatches from both verification methods and normalize
         all_mismatches = recursive_results['mismatches'] + \
             business_logic_mismatches
 
-        # Deduplicate mismatches based on path and level
-        seen_paths = set()
-        unique_mismatches = []
+        # Normalize: include table identifiers and drop 'path' for output
+        normalized_mismatches = []
+        for m in all_mismatches:
+            normalized_mismatches.append({
+                'item_name': m.get('item_name'),
+                'level': m.get('level'),
+                'amount': m.get('amount'),
+                'children_sum': m.get('children_sum'),
+                'difference': m.get('difference'),
+                'table_number': m.get('table_number'),
+                'reference_number': m.get('reference_number'),
+                'is_main_table': m.get('is_main_table')
+            })
 
-        for mismatch in all_mismatches:
-            path_key = f"{mismatch['path']}_{mismatch['level']}"
-            if path_key not in seen_paths:
-                seen_paths.add(path_key)
+        # Deduplicate by (item_name, level, table identifier)
+        seen_keys = set()
+        unique_mismatches = []
+        for mismatch in normalized_mismatches:
+            table_key = mismatch.get(
+                'reference_number') or mismatch.get('table_number') or ''
+            key = f"{mismatch.get('item_name')}|{mismatch.get('level')}|{table_key}"
+            if key not in seen_keys:
+                seen_keys.add(key)
                 unique_mismatches.append(mismatch)
 
         total_mismatched_items = len(unique_mismatches)
