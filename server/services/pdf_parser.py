@@ -507,6 +507,14 @@ class PDFParser:
                             "参照番号": reference_number
                         }
 
+                        # Include Kitakami-only code column when present in the subtable row
+                        try:
+                            code_value = (row.get("明細単価番号", "") or "").strip()
+                            if code_value:
+                                raw_fields["明細単価番号"] = code_value
+                        except Exception:
+                            pass
+
                         # Create SubtableItem only if we have a valid item name
                         if item_name:
                             # Get table title from the subtable

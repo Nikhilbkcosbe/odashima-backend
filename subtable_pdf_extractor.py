@@ -15,20 +15,34 @@ class SubtablePDFExtractor:
         """Initialize the subtable extractor with flexible column patterns."""
         # Define flexible patterns for the 4 required columns
         self.column_patterns = {
+            # Kitakami header variants are space-tolerant; we normalize before matching
             "名称・規格": [
-                "名称・規格", "名称規格", "名　称　・　規　格", "名称　規格",
+                "名称・規格", "名称規格", "名　称　・　規　格", "名称　規格", "名 称 ・ 規 格",
                 "名称・規格　格", "名称・規格格", "名称", "規格", "項目", "品名"
             ],
             "単位": [
-                "単位", "単　位", "単 位", "たんい", "たんい"
+                "単位", "単　位", "単 位", "たんい"
             ],
             "数量": [
                 "数量", "数　量", "数 量", "すうりょう"
+            ],
+            # Optional columns frequently present in Kitakami subtables
+            "単価": [
+                "単価", "単 価", "たんか"
+            ],
+            "金額": [
+                "金額", "金 額"
+            ],
+            "明細単価番号": [
+                "明細単価番号", "明 細 単 価 番 号"
             ],
             "摘要": [
                 "摘要", "摘　要", "摘 要", "備考", "てきよう"
             ]
         }
+
+        # Global stop flag: set to True when "入力データ一覧表" is encountered
+        self.stop_all_extraction = False
 
     def extract_subtables_from_pdf(self, pdf_path: str, start_page: int, end_page: int) -> Dict[str, Any]:
         """
@@ -70,6 +84,12 @@ class SubtablePDFExtractor:
                     page_subtables = self._extract_subtables_from_page(
                         page, page_num + 1)
                     result["subtables"].extend(page_subtables)
+
+                    # Stop all extraction if global stop marker was encountered
+                    if self.stop_all_extraction:
+                        logger.info(
+                            "Stop marker '入力データ一覧表' encountered. Halting further subtable extraction.")
+                        break
 
                 result["total_subtables"] = len(result["subtables"])
                 result["total_rows"] = sum(len(subtable["rows"])
@@ -117,10 +137,22 @@ class SubtablePDFExtractor:
                 if not table or len(table) < 2:
                     continue
 
+                # Check global stop marker within this table before any processing
+                if self._table_has_global_stop_marker(table):
+                    self.stop_all_extraction = True
+                    logger.info(
+                        "Detected global stop row '入力データ一覧表' within table. Stopping now.")
+                    return page_subtables
+
                 table_subtables = self._extract_subtables_from_table(
                     table, reference_numbers, page_num, table_idx
                 )
                 page_subtables.extend(table_subtables)
+
+                if self.stop_all_extraction:
+                    logger.info(
+                        "Global stop flag set during table processing. Exiting page early.")
+                    return page_subtables
 
         except Exception as e:
             logger.error(f"Error processing page {page_num}: {e}")
@@ -155,6 +187,7 @@ class SubtablePDFExtractor:
         current_reference = None
         current_subtable_rows = []
         current_column_mapping = None
+        current_is_kitakami = False  # Track if current subtable uses Kitakami-style headers
         current_table_title = None
         processed_rows = set()  # Track processed rows to avoid duplicates
 
@@ -176,14 +209,33 @@ class SubtablePDFExtractor:
             if row[0] and ('3745' in str(row[0]) or '合計' in str(row[0])):
                 logger.info(f"🎯 DEBUG: Processing row {row_idx}: {row}")
 
+            # If we encounter the global stop marker anywhere, halt all extraction
+            if self._row_is_global_stop_marker(row):
+                self.stop_all_extraction = True
+                logger.info(
+                    "Encountered '入力データ一覧表' row. Halting all subtable extraction.")
+                break
+
             # Process data rows for current subtable FIRST (before checking for references)
             if current_reference:
-                # Check for total row (end of subtable)
-                if self._is_total_row(row):
+                # Check for total row (end of current subtable)
+                if self._is_total_row(row, current_is_kitakami):
                     logger.info(
-                        f"Found total row for {current_reference}, ending subtable")
+                        f"Found total row for {current_reference}, ending current subtable and searching for next reference")
                     logger.info(f"🎯 DEBUG: Total row content: {row}")
-                    break
+                    # Finalize current subtable
+                    if current_subtable_rows:
+                        subtable = self._create_subtable_dict(
+                            current_reference, current_subtable_rows, page_num, table_idx, current_table_title
+                        )
+                        subtables.append(subtable)
+                    # Reset state to look for the next subtable within the same table
+                    current_reference = None
+                    current_subtable_rows = []
+                    current_column_mapping = None
+                    current_table_title = None
+                    # Continue scanning remaining rows for next reference
+                    continue
 
                 # Skip header row - check if this row contains column headers
                 row_text_check = ' '.join(
@@ -209,7 +261,7 @@ class SubtablePDFExtractor:
 
                     # Call multi-row extraction once from the first data row
                     extracted_rows, processed_indices = self._extract_multirow_data(
-                        table, row_idx, current_column_mapping, current_reference)
+                        table, row_idx, current_column_mapping, current_reference, current_is_kitakami)
                     # Add all extracted logical rows
                     for row_data in extracted_rows:
                         if row_data and any(row_data.values()):
@@ -262,6 +314,9 @@ class SubtablePDFExtractor:
                 if column_mapping and header_row_idx is not None:
                     current_reference = found_reference
                     current_column_mapping = column_mapping
+                    # Determine Kitakami-like context for this subtable
+                    current_is_kitakami = '明細単価番号' in (
+                        current_column_mapping or {})
 
                     # Extract table title from the reference row
                     table_title = extract_pdf_table_title_items(
@@ -353,10 +408,31 @@ class SubtablePDFExtractor:
 
         return None
 
-    def _is_total_row(self, row: List[str]) -> bool:
-        """Check if a row contains 合計 (total)."""
+    def _is_total_row(self, row: List[str], is_kitakami: bool = False) -> bool:
+        """Return True if this row represents the total separator for the current subtable.
+
+        - For all areas: rows containing '合計' anywhere end the subtable.
+        - For Kitakami only: an exact '計' row (ignoring spaces/width) ends the subtable.
+        """
         row_text = " ".join([str(cell) if cell else "" for cell in row])
-        return "合計" in row_text
+        norm = self._normalize_simple(row_text)
+        if "合計" in row_text:
+            return True
+        if is_kitakami and norm == "計":
+            return True
+        return False
+
+    def _row_is_global_stop_marker(self, row: List[str]) -> bool:
+        """Return True if row text equals '入力データ一覧表' ignoring width/spaces."""
+        row_text = " ".join([str(cell) if cell else "" for cell in row])
+        norm = self._normalize_simple(row_text)
+        return "入力データ一覧表" in norm
+
+    def _table_has_global_stop_marker(self, table: List[List[str]]) -> bool:
+        for r in table:
+            if self._row_is_global_stop_marker(r):
+                return True
+        return False
 
     def _extract_row_data(self, row: List[str], column_mapping: Dict[str, int]) -> Dict[str, str]:
         """Extract data from a row based on column mapping."""
@@ -376,7 +452,8 @@ class SubtablePDFExtractor:
         return row_data
 
     def _extract_multirow_data(self, table: List[List[str]], start_row_idx: int,
-                               column_mapping: Dict[str, int], reference_number: str) -> Tuple[List[Dict[str, str]], List[int]]:
+                               column_mapping: Dict[str, int], reference_number: str,
+                               kitakami_mode: bool = False) -> Tuple[List[Dict[str, str]], List[int]]:
         """Extract data that may span multiple rows, creating separate logical rows for each item.
         Returns: (list_of_extracted_rows, list_of_processed_row_indices)
         """
@@ -401,7 +478,7 @@ class SubtablePDFExtractor:
             current_row = table[current_idx]
 
             # Stop if we encounter a 合計 (total) row
-            if current_row[0] and '合計' in str(current_row[0]):
+            if current_row[0] and ('合計' in str(current_row[0]) or (kitakami_mode and self._normalize_simple(str(current_row[0])) == '計')):
                 if is_debug:
                     logger.info(f"🎯 DEBUG: Stopping at 合計 row {current_idx}")
                 break
@@ -436,7 +513,11 @@ class SubtablePDFExtractor:
                 # First, check the current row for any additional data
                 for col_name, col_idx in column_mapping.items():
                     if col_name != '名称・規格' and col_idx < len(current_row) and current_row[col_idx]:
-                        cell_value = str(current_row[col_idx]).strip()
+                        if col_name == '数量':
+                            cell_value = self._merge_quantity_with_adjacent(
+                                current_row, col_idx) or str(current_row[col_idx]).strip()
+                        else:
+                            cell_value = str(current_row[col_idx]).strip()
                         if cell_value and cell_value not in ["名称・規格", "単位", "数量", "摘要"]:
                             row_data[col_name] = cell_value
                             if is_debug:
@@ -455,6 +536,7 @@ class SubtablePDFExtractor:
                     if lookahead_row[0]:
                         cell_text = str(lookahead_row[0]).strip()
                         if ('合計' in cell_text or
+                            (kitakami_mode and self._normalize_simple(cell_text) == '計') or
                             (len(cell_text) > 2 and cell_text != item_name and
                              cell_text not in ["", "名称・規格", "単位", "数量", "摘要"])):
                             if is_debug:
@@ -462,13 +544,18 @@ class SubtablePDFExtractor:
                                     f"🎯 DEBUG: Stopping lookahead at row {lookahead_idx}: '{cell_text}'")
                             break
 
-                    # Look for missing unit/quantity in this lookahead row
+                    # Look for missing unit/quantity/remarks/code in this lookahead row
                     found_data = False
-                    for col_name in ['単位', '数量', '摘要']:
+                    for col_name in ['単位', '数量', '摘要', '明細単価番号']:
                         col_idx = column_mapping.get(col_name, -1)
                         if (col_idx != -1 and col_idx < len(lookahead_row) and
-                                lookahead_row[col_idx] and not row_data[col_name]):
-                            cell_value = str(lookahead_row[col_idx]).strip()
+                                lookahead_row[col_idx] and not row_data.get(col_name)):
+                            if col_name == '数量':
+                                cell_value = self._merge_quantity_with_adjacent(
+                                    lookahead_row, col_idx) or str(lookahead_row[col_idx]).strip()
+                            else:
+                                cell_value = str(
+                                    lookahead_row[col_idx]).strip()
                             if cell_value and cell_value not in ["名称・規格", "単位", "数量", "摘要"]:
                                 row_data[col_name] = cell_value
                                 item_processed_indices.append(lookahead_idx)
@@ -478,6 +565,14 @@ class SubtablePDFExtractor:
                                         f"🎯 DEBUG: Found {col_name} = '{cell_value}' at lookahead row {lookahead_idx}")
 
                     # If we found some data, we can continue looking for more
+
+                # If quantity is still empty but we have a quantity column, try merging using current row
+                qty_col_idx = column_mapping.get('数量', -1)
+                if not row_data['数量'] and qty_col_idx != -1:
+                    merged_here = self._merge_quantity_with_adjacent(
+                        current_row, qty_col_idx)
+                    if merged_here:
+                        row_data['数量'] = merged_here
 
                 # Add this logical row to results
                 extracted_rows.append(row_data)
@@ -516,6 +611,69 @@ class SubtablePDFExtractor:
             subtable_dict["table_title"] = table_title
 
         return subtable_dict
+
+    def _normalize_simple(self, text: str) -> str:
+        """Normalize text using NFKC and remove all spaces (ASCII and full-width)."""
+        try:
+            import unicodedata
+            normalized = unicodedata.normalize('NFKC', text)
+        except Exception:
+            normalized = text
+        return re.sub(r"[\s\u3000]+", "", normalized)
+
+    # --- Kitakami quantity merge helpers ---
+    def _merge_quantity_with_adjacent(self, row: List[str], qty_idx: int) -> str:
+        """Return merged quantity string by combining integer in qty cell with adjacent decimal part if present."""
+        try:
+            if qty_idx < 0 or qty_idx >= len(row):
+                return ""
+            cell_text = self._normalize_simple(
+                str(row[qty_idx])) if row[qty_idx] else ""
+            if not cell_text:
+                return ""
+
+            main_num = self._extract_first_number(cell_text)
+            if main_num is None:
+                return ""
+            if "." in main_num:
+                return main_num
+
+            # Look for decimal part in immediate neighbors
+            decimal_part = self._find_adjacent_decimal_part(row, qty_idx)
+            if decimal_part is not None:
+                try:
+                    # Ensure integer portion is int-like
+                    integer_part = str(int(float(main_num)))
+                    return f"{integer_part}.{decimal_part}"
+                except Exception:
+                    return main_num
+            return main_num
+        except Exception:
+            return ""
+
+    def _find_adjacent_decimal_part(self, row: List[str], qty_idx: int) -> Optional[str]:
+        for offset in [-1, 1]:
+            check_idx = qty_idx + offset
+            if 0 <= check_idx < len(row) and row[check_idx]:
+                t = self._normalize_simple(str(row[check_idx]))
+                # If looks like description with letters/kanji/units, skip
+                if re.search(r"[A-Za-z一-龯号mktN明]", t):
+                    continue
+                # .xx or 0.xx
+                m = re.search(r"^0\.(\d+)$", t)
+                if m:
+                    return m.group(1)
+                m = re.search(r"^\.(\d+)$", t)
+                if m:
+                    return m.group(1)
+                # Pure digits up to 3 chars → decimal digits
+                if re.match(r"^\d{1,3}$", t):
+                    return t
+        return None
+
+    def _extract_first_number(self, text: str) -> Optional[str]:
+        m = re.search(r"\d+(?:\.\d+)?", text)
+        return m.group(0) if m else None
 
     def _extract_unit_value(self, cell_text: str) -> str:
         """
