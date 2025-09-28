@@ -160,22 +160,48 @@ class SubtablePDFExtractor:
         return page_subtables
 
     def _find_reference_numbers(self, text: str) -> List[str]:
-        """Find reference numbers like 内4号, 単3号, etc. in text."""
-        # Pattern: any kanji character(s) + digits + 号
-        # Handles full-width and half-width characters, with optional spaces
-        pattern = r'([一-龯々]+)\s*(\d+)\s*号'
+        """Find reference numbers in text.
 
-        matches = re.findall(pattern, text)
-        reference_numbers = []
+        Supports:
+        - Standard: <Kanji><digits>号 (e.g., 内4号, 単3号)
+        - Kitakami style: 第<digits>号<Kanji> (e.g., 第12号施)
+        Both tolerate arbitrary spaces and full-width digits.
+        """
+        if not text:
+            return []
 
-        for kanji, number in matches:
-            # Remove any spaces and create clean reference number
-            clean_ref = f"{kanji}{number}号"
-            if clean_ref not in reference_numbers:
-                reference_numbers.append(clean_ref)
+        refs: List[str] = []
 
-        logger.debug(f"Extracted reference numbers: {reference_numbers}")
-        return reference_numbers
+        # Kitakami style FIRST: 第 + digits + 号 + one Kanji (prefer the longer, more specific form)
+        kita_pattern = r'第\s*([0-9０-９]+)\s*号\s*([一-龯])'
+        for num, tail in re.findall(kita_pattern, text):
+            try:
+                num_norm = str(num).translate(
+                    str.maketrans('０１２３４５６７８９', '0123456789'))
+            except Exception:
+                num_norm = str(num)
+            value = f"第{num_norm}号{tail}"
+            if value not in refs:
+                refs.append(value)
+
+        # Standard pattern: Kanji + digits + 号 (avoid overshadowing Kitakami-specific matches)
+        std_pattern = r'([一-龯々]+)\s*([0-9０-９]+)\s*号'
+        for kanji, num in re.findall(std_pattern, text):
+            try:
+                num_norm = str(num).translate(
+                    str.maketrans('０１２３４５６７８９', '0123456789'))
+            except Exception:
+                num_norm = str(num)
+            value = f"{kanji}{num_norm}号"
+            # If this is a bare 第N号 and we already captured 第N号X, skip the shorter one
+            if value.startswith("第"):
+                if any(r.startswith(value) and len(r) > len(value) for r in refs):
+                    continue
+            if value not in refs:
+                refs.append(value)
+
+        logger.debug(f"Extracted reference numbers: {refs}")
+        return refs
 
     def _extract_subtables_from_table(self, table: List[List[str]], reference_numbers: List[str],
                                       page_num: int, table_idx: int) -> List[Dict[str, Any]]:
@@ -344,20 +370,44 @@ class SubtablePDFExtractor:
         return subtables
 
     def _find_reference_in_row(self, row_text: str, reference_numbers: List[str]) -> Optional[str]:
-        """Check if a row contains any of the reference numbers."""
-        for ref_num in reference_numbers:
-            # Extract kanji and number parts properly
-            match = re.match(r'([一-龯々]+)(\d+)号', ref_num)
-            if not match:
-                continue
+        """Return the first reference from reference_numbers that appears in this row.
 
-            kanji_part = match.group(1)
-            number_part = match.group(2)
+        Matches both standard and Kitakami styles, tolerating spaces/width differences.
+        """
+        if not row_text:
+            return None
 
-            # Create flexible pattern that handles spaces
-            pattern = f"{kanji_part}\\s+{number_part}\\s*号"
-            if re.search(pattern, row_text):
+        # Normalized containment check as a robust fallback
+        norm_row = self._normalize_simple(row_text)
+
+        # Prefer longer references first (e.g., 第12号施 over 第12号)
+        try:
+            sorted_refs = sorted(reference_numbers, key=lambda r: len(
+                self._normalize_simple(r)), reverse=True)
+        except Exception:
+            sorted_refs = reference_numbers
+
+        for ref_num in sorted_refs:
+            # 1) Exact normalized containment
+            if self._normalize_simple(ref_num) in norm_row:
                 return ref_num
+
+            # 2) Standard style regex (Kanji + digits + 号) with spaces
+            m_std = re.match(r'([一-龯々]+)(\d+)号', ref_num)
+            if m_std:
+                kanji_part, number_part = m_std.group(1), m_std.group(2)
+                pattern = f"{kanji_part}\\s*{number_part}\\s*号"
+                if re.search(pattern, row_text):
+                    return ref_num
+
+            # 3) Kitakami style: 第 + digits + 号 + one Kanji
+            m_kita = re.match(r'第(\d+)号([一-龯])', ref_num)
+            if m_kita:
+                num, tail = m_kita.group(1), m_kita.group(2)
+                pattern = f"第\\s*{num}\\s*号\\s*{tail}"
+                if re.search(pattern, row_text):
+                    return ref_num
+
         return None
 
     def _find_column_headers(self, row: List[str]) -> Optional[Dict[str, int]]:

@@ -169,14 +169,33 @@ class Matcher:
             normalized = re.sub(r"-\d+$", "", normalized)
             return normalized
 
+        # Kitakami reference equivalence: treat 明3号 == 第3号明, 施12号 == 第12号施, etc.
+        # Rule: the trailing Kanji in PDF form (第N号X) or leading Kanji in Excel form (XN号) must match,
+        # N号 must match, and the presence of 第 is optional.
+        def kitakami_ref_key(ref: str) -> str:
+            if not ref:
+                return ''
+            r = norm_ref(ref)
+            # Extract patterns: 第?N号X  or  XN号
+            m_pdf = re.match(r'^第?(\d+)号([一-龯])$', r)
+            if m_pdf:
+                num, tail = m_pdf.group(1), m_pdf.group(2)
+                return f"{tail}:{num}"
+            m_excel = re.match(r'^([一-龯])(\d+)号$', r)
+            if m_excel:
+                tail, num = m_excel.group(1), m_excel.group(2)
+                return f"{tail}:{num}"
+            # Fallback: return normalized as-is to keep grouping for non-Kitakami patterns
+            return r
+
         from collections import defaultdict
         pdf_by_ref = defaultdict(list)
         excel_by_ref = defaultdict(list)
         for item in pdf_subtables:
-            pdf_by_ref[norm_ref(
+            pdf_by_ref[kitakami_ref_key(
                 getattr(item, 'reference_number', '')).strip()].append(item)
         for item in excel_subtables:
-            excel_by_ref[norm_ref(
+            excel_by_ref[kitakami_ref_key(
                 getattr(item, 'reference_number', '')).strip()].append(item)
 
         all_refs = set(pdf_by_ref.keys()) | set(excel_by_ref.keys())
