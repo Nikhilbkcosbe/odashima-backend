@@ -26,7 +26,7 @@ class ExcelParser:
         self.upload_folder = "uploads"
         os.makedirs(self.upload_folder, exist_ok=True)
 
-    def extract_hierarchical_data(self, file_path: str, sheet_name: str) -> Optional[List[Dict]]:
+    def extract_hierarchical_data(self, file_path: str, sheet_name: str, project_area: str = "岩手") -> Optional[List[Dict]]:
         """
         Extract hierarchical data from Excel file
 
@@ -45,7 +45,8 @@ class ExcelParser:
             df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
 
             # Extract logical rows with spanning
-            logical_rows = self._extract_logical_rows_with_spanning(df)
+            logical_rows = self._extract_logical_rows_with_spanning(
+                df, project_area)
 
             # Build hierarchy
             hierarchical_data = self._build_hierarchy(logical_rows)
@@ -72,7 +73,7 @@ class ExcelParser:
         # Count full-width spaces (Japanese indentation)
         return item_name.count('\u3000')
 
-    def _extract_single_logical_row(self, df: pd.DataFrame, start_row: int) -> Optional[LogicalRow]:
+    def _extract_single_logical_row(self, df: pd.DataFrame, start_row: int, project_area: str = "岩手") -> Optional[LogicalRow]:
         """Extract a single logical row with spanning"""
         try:
             # Get the first row of the logical row
@@ -84,8 +85,14 @@ class ExcelParser:
             quantity = self._get_cell_value(row_data[4])
             unit_price = self._get_cell_value(row_data[5])
             amount = self._get_cell_value(row_data[6])
-            notes = self._get_cell_value(
-                row_data[7]) if len(row_data) > 7 else ""
+
+            # For Kitakami projects, extract 摘要 (notes) from column 7
+            if project_area == "北上市":
+                notes = self._get_cell_value(
+                    row_data[7]) if len(row_data) > 7 else ""
+            else:
+                notes = self._get_cell_value(
+                    row_data[7]) if len(row_data) > 7 else ""
 
             # Check for spanning in subsequent rows
             next_row = start_row + 1
@@ -135,7 +142,7 @@ class ExcelParser:
                 f"Error extracting logical row at {start_row}: {str(e)}")
             return None
 
-    def _extract_logical_rows_with_spanning(self, df: pd.DataFrame) -> List[LogicalRow]:
+    def _extract_logical_rows_with_spanning(self, df: pd.DataFrame, project_area: str = "岩手") -> List[LogicalRow]:
         """Extract all logical rows with spanning from the dataframe"""
         logical_rows = []
         row_index = 0
@@ -161,7 +168,8 @@ class ExcelParser:
                 continue
 
             # Extract logical row
-            logical_row = self._extract_single_logical_row(df, row_index)
+            logical_row = self._extract_single_logical_row(
+                df, row_index, project_area)
             if logical_row and logical_row.item_name.strip():
                 # Skip header-like rows
                 item_name_lower = logical_row.item_name.lower()
@@ -223,6 +231,69 @@ class ExcelParser:
         except Exception as e:
             logger.error(f"Error reading Excel file: {str(e)}")
             return []
+
+    def extract_items_from_buffer_with_sheet(self, buffer, sheet_name: str, project_area: str = "岩手") -> List[Dict]:
+        """
+        Extract items from Excel buffer for a specific sheet
+
+        Args:
+            buffer: Excel file buffer
+            sheet_name: Name of the sheet to extract from
+            project_area: Project area (岩手 or 北上市)
+
+        Returns:
+            List of extracted items
+        """
+        try:
+            # Save buffer to temporary file
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+                tmp_file.write(buffer)
+                tmp_file_path = tmp_file.name
+
+            # Extract hierarchical data
+            hierarchical_data = self.extract_hierarchical_data(
+                tmp_file_path, sheet_name, project_area)
+
+            # Clean up temporary file
+            os.unlink(tmp_file_path)
+
+            if not hierarchical_data:
+                return []
+
+            # Convert to flat list of items
+            items = []
+            for item in hierarchical_data:
+                items.extend(self._flatten_hierarchy(item))
+
+            return items
+
+        except Exception as e:
+            logger.error(f"Error extracting items from Excel buffer: {str(e)}")
+            return []
+
+    def _flatten_hierarchy(self, item: Dict, level: int = 0) -> List[Dict]:
+        """Flatten hierarchical data into a list of items"""
+        items = []
+
+        # Add current item
+        flat_item = {
+            "item_key": item.get("item_name", ""),
+            "quantity": float(item.get("quantity", 0)) if item.get("quantity") else 0.0,
+            "unit": item.get("unit", ""),
+            "unit_price": item.get("unit_price", ""),
+            "amount": item.get("amount", ""),
+            "notes": item.get("notes", ""),
+            "level": level,
+            "source": "Excel"
+        }
+        items.append(flat_item)
+
+        # Add children
+        for child in item.get("children", []):
+            items.extend(self._flatten_hierarchy(child, level + 1))
+
+        return items
 
     async def save_uploaded_file(self, file, filename: str) -> str:
         """

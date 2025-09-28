@@ -15,8 +15,9 @@ import logging
 import gc
 import tempfile
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Body, Depends
 from fastapi.responses import FileResponse
+from server.helpers.auth import OAuth2PasswordBearerWithCookie
 from subtable_title_comparator import compare_all_subtable_titles, compare_all_subtable_titles_from_cached_data
 import sys
 import os
@@ -26,7 +27,19 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Define the OAuth2 scheme for authentication
+oauth2_scheme = OAuth2PasswordBearerWithCookie(tokenUrl="/api/v1/auth/login")
+
 router = APIRouter()
+
+
+def validate_project_area(area: str):
+    """Validate that the project area is supported (岩手 or 北上市)"""
+    if area not in ["岩手", "北上市"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"サポートされていない地域です。選択された地域: {area}"
+        )
 
 
 @router.get("/test")
@@ -363,11 +376,14 @@ async def extract_and_cache_files(
     end_page: Optional[int] = Form(None),
     sheet_name: Optional[str] = Form(None),
     pdf_subtable_start_page: Optional[int] = Form(None),
-    pdf_subtable_end_page: Optional[int] = Form(None)
+    pdf_subtable_end_page: Optional[int] = Form(None),
+    project_area: str = Form(...),
+    current_user: str = Depends(oauth2_scheme)
 ):
     """
     OPTIMIZED EXTRACTION ENDPOINT: Extract PDF and Excel data once and cache for reuse.
     This eliminates redundant extraction across multiple comparison operations.
+    IWATE AREA ONLY: This API only works for projects with area = "岩手"
 
     Args:
         pdf_file: PDF tender document
@@ -377,18 +393,23 @@ async def extract_and_cache_files(
         sheet_name: Specific Excel sheet name for main table extraction
         pdf_subtable_start_page: Starting page number for PDF subtable extraction
         pdf_subtable_end_page: Ending page number for PDF subtable extraction
+        project_area: Project area (must be "岩手" for this API)
 
     Returns:
         session_id: Unique identifier for cached extraction results
         extraction_summary: Summary of extracted data
     """
     logger.info("=== STARTING OPTIMIZED EXTRACTION AND CACHING ===")
+    logger.info(f"Project area: {project_area}")
     logger.info(f"PDF file: {pdf_file.filename}")
     logger.info(f"Excel file: {excel_file.filename}")
     logger.info(f"PDF main table page range: {start_page} to {end_page}")
     logger.info(
         f"PDF subtable page range: {pdf_subtable_start_page} to {pdf_subtable_end_page}")
     logger.info(f"Excel sheet: {sheet_name or 'Auto-detect'}")
+
+    # Validate project area for Iwate projects only
+    validate_project_area(project_area)
 
     # Validate file types
     if not pdf_file.filename.lower().endswith('.pdf'):
@@ -443,8 +464,11 @@ async def extract_and_cache_files(
 
         # Extract PDF main table items
         logger.info("Extracting PDF main table items...")
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
         logger.info(f"Extracted {len(pdf_items)} PDF main table items")
 
         # Extract Excel main table items
@@ -455,8 +479,11 @@ async def extract_and_cache_files(
         else:
             # Use original parser for all sheets
             excel_parser = ExcelParser()
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
         logger.info(f"Extracted {len(excel_items)} Excel main table items")
 
         # Extract subtables from both PDF and Excel
@@ -486,6 +513,7 @@ async def extract_and_cache_files(
             'sheet_name': sheet_name,
             'pdf_subtable_start_page': pdf_subtable_start_page,
             'pdf_subtable_end_page': pdf_subtable_end_page,
+            'project_area': project_area,
             'extracted_at': time.time()
         }
 
@@ -919,7 +947,8 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
                     "source": item.source,
                     "page_number": item.page_number,
                     "logical_line_number": getattr(item, 'logical_line_number', None),
-                    "table_number": getattr(item, 'table_number', None)
+                    "table_number": getattr(item, 'table_number', None),
+                    "notes": getattr(item, 'notes', None)
                 }
                 for item in excel_items
             ],
@@ -1159,10 +1188,13 @@ async def compare_tender_files(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         # Extract items from PDF with page range
         logger.info("Extracting items from PDF with specified parameters...")
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
         logger.info(f"Total PDF items extracted: {len(pdf_items)}")
 
         # Extract items from Excel with sheet filter
@@ -1176,8 +1208,11 @@ async def compare_tender_files(
                 f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
         else:
             # Use original method for all sheets
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
             logger.info(f"Total Excel items extracted: {len(excel_items)}")
 
         # Close Excel buffer
@@ -1319,10 +1354,13 @@ async def compare_main_table_corrected(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         # Extract items from PDF with page range
         logger.info("Extracting items from PDF with specified parameters...")
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
         logger.info(f"Total PDF items extracted: {len(pdf_items)}")
 
         # Extract items from Excel using corrected main table extraction
@@ -1459,16 +1497,22 @@ async def compare_tender_files_missing_only(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
 
         if sheet_name:
             excel_table_extractor = ExcelTableExtractorService()
             excel_items = excel_table_extractor.extract_main_table_from_buffer(
                 excel_buffer, sheet_name)
         else:
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
 
         # --- Subtable extraction ---
         # For subtables, use the same sheet_name as main table for Excel
@@ -1633,16 +1677,22 @@ async def compare_tender_files_mismatches_only(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
 
         if sheet_name:
             excel_table_extractor = ExcelTableExtractorService()
             excel_items = excel_table_extractor.extract_main_table_from_buffer(
                 excel_buffer, sheet_name)
         else:
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
 
         # --- Subtable extraction ---
         excel_table_extractor = ExcelTableExtractorService()
@@ -1832,8 +1882,11 @@ async def compare_tender_files_unit_mismatches_only(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
 
         # Extract items from Excel with sheet filter
         logger.info("Extracting items from Excel with specified parameters...")
@@ -1846,8 +1899,11 @@ async def compare_tender_files_unit_mismatches_only(
                 f"Total Excel items extracted using standalone corrected logic: {len(excel_items)}")
         else:
             # Use original method for all sheets
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
             logger.info(f"Total Excel items extracted: {len(excel_items)}")
 
         excel_buffer.close()
@@ -2005,8 +2061,11 @@ async def compare_tender_files_extra_items_only(
         excel_parser = ExcelParser()
 
         # Extract main table items from PDF
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
 
         # Extract main table items from Excel with sheet filter
         logger.info(
@@ -2020,8 +2079,11 @@ async def compare_tender_files_extra_items_only(
                 f"Total Excel main table items extracted using standalone corrected logic: {len(excel_items)}")
         else:
             # Use original method for all sheets
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
             logger.info(
                 f"Total Excel main table items extracted: {len(excel_items)}")
 
@@ -2366,16 +2428,22 @@ async def debug_matching(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
 
         if sheet_name:
             excel_table_extractor = ExcelTableExtractorService()
             excel_items = excel_table_extractor.extract_main_table_from_buffer(
                 excel_buffer, sheet_name)
         else:
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
 
         excel_buffer.close()
 
@@ -2531,8 +2599,11 @@ async def compare_matching_methods(
 
         # Parse files
         pdf_parser = PDFParser()
+        # Default to Iwate for this endpoint
+        project_area = '岩手'
+
         pdf_items = pdf_parser.extract_tables_with_range(
-            pdf_path, start_page, end_page)
+            pdf_path, start_page, end_page, project_area)
 
         if sheet_name:
             excel_table_extractor = ExcelTableExtractorService()
@@ -2540,8 +2611,11 @@ async def compare_matching_methods(
                 excel_buffer, sheet_name)
         else:
             excel_parser = ExcelParser()
+            # Default to Iwate for this endpoint
+            project_area = '岩手'
+
             excel_items = excel_parser.extract_items_from_buffer_with_sheet(
-                excel_buffer, sheet_name)
+                excel_buffer, sheet_name, project_area)
 
         excel_buffer.close()
 

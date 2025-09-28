@@ -20,6 +20,7 @@ oauth2_scheme = OAuth2PasswordBearerWithCookie(tokenUrl="/api/v1/auth/login")
 class ProjectInputDataModel(BaseModel):
     project_name: str
     description: Optional[str] = None
+    area: Optional[str] = None
 
 # Create a new project
 
@@ -44,6 +45,7 @@ async def create_project(project_data: ProjectInputDataModel, current_user: str 
             "_id": str(uuid.uuid4()),
             "project_name": project_data.project_name,
             "description": project_data.description,
+            "area": project_data.area,
             "created_at": datetime.now(),
             "created_by": current_user["email"]
         }
@@ -162,6 +164,7 @@ async def update_project(project_id: str, project_data: ProjectInputDataModel, c
         update_data = {
             "project_name": project_data.project_name,
             "description": project_data.description,
+            "area": project_data.area,
             "updated_at": datetime.now(),
             "updated_by": current_user["email"]
         }
@@ -216,7 +219,6 @@ async def delete_project(project_id: str, current_user: str = Depends(oauth2_sch
         HTTPException: If the user is not authorized or the project is not found.
     """
     try:
-
 
         # Find the project to delete
         project = await projects_collection.find_one({"_id": project_id})

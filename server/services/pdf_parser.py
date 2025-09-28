@@ -29,9 +29,17 @@ class PDFParser:
             "摘要": ["摘要", "備考", "摘 要"]
         }
 
+        # Kitakami-specific column patterns
+        self.kitakami_column_patterns = {
+            "費目・工種・種別・細": ["費 目 ・ 工 種 ・ 種 別 ・ 細", "費目・工種・種別・細別・規格"],
+            "数量": ["数量", "数 量"],
+            "単位": ["単位", "単 位"],
+            "明細単価番号": ["明細単価番号", "明 細 単 価 番 号"]
+        }
+
         self.column_patterns = self.default_column_patterns.copy()
 
-    def extract_tables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None) -> List[TenderItem]:
+    def extract_tables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None, project_area: str = "岩手") -> List[TenderItem]:
         """
         Extract tables from PDF iteratively with specified page range.
         This is the main entry point for parsing the main table.
@@ -40,6 +48,7 @@ class PDFParser:
         logger.info(f"Starting PDF extraction from: {pdf_path}")
         logger.info(
             f"Page range: {start_page or 'start'} to {end_page or 'end'}")
+        logger.info(f"Project area: {project_area}")
 
         try:
             with pdfplumber.open(pdf_path) as pdf:
@@ -66,7 +75,8 @@ class PDFParser:
                     page = pdf.pages[page_num]
                     logger.info(
                         f"Processing page {page_num + 1}/{total_pages}")
-                    page_items = self._extract_tables_from_page(page, page_num)
+                    page_items = self._extract_tables_from_page(
+                        page, page_num, project_area)
                     all_items.extend(page_items)
 
         except Exception as e:
@@ -75,7 +85,7 @@ class PDFParser:
             raise
         return all_items
 
-    def _extract_tables_from_page(self, page, page_num: int) -> List[TenderItem]:
+    def _extract_tables_from_page(self, page, page_num: int, project_area: str = "岩手") -> List[TenderItem]:
         """Extract all tables from a single page."""
         page_items = []
         try:
@@ -83,13 +93,13 @@ class PDFParser:
             logger.info(f"Found {len(tables)} tables on page {page_num + 1}")
             for table_num, table in enumerate(tables):
                 page_items.extend(self._process_single_table(
-                    table, page_num, table_num))
+                    table, page_num, table_num, project_area))
         except Exception as e:
             logger.error(
                 f"Error processing page {page_num + 1}: {e}", exc_info=True)
         return page_items
 
-    def _process_single_table(self, table: List[List], page_num: int, table_num: int) -> List[TenderItem]:
+    def _process_single_table(self, table: List[List], page_num: int, table_num: int, project_area: str = "岩手") -> List[TenderItem]:
         """Process a single table and extract all valid items from it."""
         items = []
         if not table or len(table) < 2:
@@ -99,15 +109,25 @@ class PDFParser:
         if header_row is None:
             return items
 
-        col_indices = self._get_column_mapping(header_row)
+        # Determine effective project area from header if possible
+        effective_area = self._detect_project_area_from_header(
+            header_row) or project_area
+
+        # Build column mapping (attempt with effective area first, then fallback to other patterns)
+        col_indices = self._get_column_mapping(header_row, effective_area)
         if not col_indices:
-            return items
+            # Fallback: try the opposite area's patterns just in case
+            fallback_area = "北上市" if effective_area == "岩手" else "岩手"
+            col_indices = self._get_column_mapping(header_row, fallback_area)
+            if not col_indices:
+                return items
+            effective_area = fallback_area
 
         data_rows = table[header_idx + 1:]
         for row_idx, row in enumerate(data_rows):
             try:
                 result = self._process_single_row_with_spanning(
-                    row, col_indices, page_num, table_num, header_idx + 1 + row_idx, items)
+                    row, col_indices, page_num, table_num, header_idx + 1 + row_idx, items, effective_area)
                 if isinstance(result, TenderItem):
                     items.append(result)
             except Exception as e:
@@ -117,15 +137,16 @@ class PDFParser:
 
     def _process_single_row_with_spanning(self, row: List, col_indices: Dict[str, int],
                                           page_num: int, table_num: int, row_num: int,
-                                          existing_items: List) -> Union[TenderItem, str, None]:
+                                          existing_items: List, project_area: str = "岩手") -> Union[TenderItem, str, None]:
         """Handles row spanning for the main table."""
         if self._is_completely_empty_row(row):
             return "skipped"
 
         raw_fields, quantity, unit = self._extract_fields_from_row(
-            row, col_indices)
+            row, col_indices, project_area)
 
-        has_item_fields = self._has_item_identifying_fields(raw_fields)
+        has_item_fields = self._has_item_identifying_fields(
+            raw_fields, project_area)
         has_quantity_data = quantity > 0 or "単位" in raw_fields
 
         if has_item_fields and not has_quantity_data:
@@ -143,25 +164,46 @@ class PDFParser:
         else:
             return "skipped"
 
-    def _extract_fields_from_row(self, row: List, col_indices: Dict[str, int]) -> Tuple[Dict[str, str], float, Optional[str]]:
+    def _extract_fields_from_row(self, row: List, col_indices: Dict[str, int], project_area: str = "岩手") -> Tuple[Dict[str, str], float, Optional[str]]:
         """Extracts all relevant fields from a single row."""
         raw_fields = {}
         quantity = 0.0
         unit = None
+
+        # For Kitakami projects, ignore rows with "合計" (total) in the item name
+        if project_area == "北上市":
+            item_name_col = col_indices.get("費目・工種・種別・細", 0)
+            if item_name_col < len(row) and row[item_name_col]:
+                item_name = str(row[item_name_col]).strip()
+                if "合計" in item_name:
+                    # Return empty fields for total rows
+                    return {}, 0.0, None
+
         for col_name, col_idx in col_indices.items():
             if col_idx < len(row) and row[col_idx]:
                 cell_value = str(row[col_idx]).strip()
                 if cell_value:
                     if col_name == "数量":
-                        quantity = self._extract_quantity(cell_value)
+                        if project_area == "北上市":
+                            # For Kitakami, pass row and column index for adjacent column reconstruction
+                            quantity = self._extract_kitakami_quantity(
+                                cell_value, row, col_idx)
+                        else:
+                            quantity = self._extract_quantity(
+                                cell_value, project_area)
                     elif col_name == "単位":
                         unit = cell_value
                     raw_fields[col_name] = cell_value
         return raw_fields, quantity, unit
 
-    def _has_item_identifying_fields(self, raw_fields: Dict[str, str]) -> bool:
+    def _has_item_identifying_fields(self, raw_fields: Dict[str, str], project_area: str = "岩手") -> bool:
         """Checks if the row contains fields that identify an item."""
-        identifying_fields = ["工事区分・工種・種別・細別", "規格", "摘要"]
+        if project_area == "北上市":
+            # Kitakami-specific identifying fields
+            identifying_fields = ["費目・工種・種別・細", "明細単価番号"]
+        else:
+            # Iwate-specific identifying fields
+            identifying_fields = ["工事区分・工種・種別・細別", "規格", "摘要"]
         return any(field in raw_fields and raw_fields[field] for field in identifying_fields)
 
     def _complete_previous_item_with_quantity_data(self, existing_items: List[TenderItem],
@@ -203,20 +245,56 @@ class PDFParser:
                 return row, i
         return (table[0], 0) if table else (None, -1)
 
-    def _get_column_mapping(self, header_row: List) -> Dict[str, int]:
+    def _get_column_mapping(self, header_row: List, project_area: str = "岩手") -> Dict[str, int]:
         """Maps column names to indices based on header row."""
         col_indices = {}
-        for col_name, patterns in self.column_patterns.items():
-            for i, cell in enumerate(header_row):
-                if cell and any(p in str(cell) for p in patterns):
-                    col_indices[col_name] = i
-                    break
+
+        # Choose patterns set and also support partial header variants
+        pattern_sets = []
+        if project_area == "北上市":
+            pattern_sets = [
+                self.kitakami_column_patterns, self.column_patterns]
+        else:
+            pattern_sets = [self.column_patterns,
+                            self.kitakami_column_patterns]
+
+        for patterns_to_use in pattern_sets:
+            tentative = {}
+            for col_name, patterns in patterns_to_use.items():
+                for i, cell in enumerate(header_row):
+                    if cell and any(p in str(cell) for p in patterns):
+                        tentative[col_name] = i
+                        break
+            # Require at least quantity and unit to proceed
+            if ("数量" in tentative) and ("単位" in tentative):
+                # Also keep any available name/spec/remarks columns
+                col_indices = tentative
+                break
+
         return col_indices
 
-    def _extract_quantity(self, cell_value) -> float:
+    def _detect_project_area_from_header(self, header_row: List) -> Optional[str]:
+        """Rudimentary detection of project area based on distinctive headers."""
+        try:
+            header_text = "|".join([str(c) for c in header_row if c])
+            # Kitakami headers often include 明細単価番号 and compact 費 目 ・ 工 種 ・ 種 別 ・ 細
+            if any(p in header_text for p in self.kitakami_column_patterns.get("明細単価番号", [])) or \
+               any(p in header_text for p in self.kitakami_column_patterns.get("費目・工種・種別・細", [])):
+                return "北上市"
+        except Exception:
+            pass
+        return None
+
+    def _extract_quantity(self, cell_value, project_area: str = "岩手") -> float:
         """Extracts numeric quantity from a cell value."""
         if not cell_value:
             return 0.0
+
+        # For Kitakami projects, use special decimal extraction logic
+        if project_area == "北上市":
+            return self._extract_kitakami_quantity(cell_value)
+
+        # Standard Iwate extraction logic
         value_str = str(cell_value).replace(",", "")
         number_match = re.search(r'[\d.]+', value_str)
         if number_match:
@@ -225,6 +303,129 @@ class PDFParser:
             except ValueError:
                 pass
         return 0.0
+
+    def _extract_kitakami_quantity(self, cell_value, row: List = None, qty_idx: int = None) -> float:
+        """
+        Extract quantity with special Kitakami decimal handling.
+        The quantity column is internally divided into normal digits and decimal digits.
+        For Kitakami: adjacent columns contain integer part and decimal part (e.g., "1" and "0.5" -> 1.5)
+        """
+        try:
+            if not cell_value:
+                return 0.0
+
+            # First, try to get quantity from the main cell
+            qty_text = self._normalize_text(str(cell_value))
+            quantity = self._extract_number_from_text(qty_text)
+            if quantity is not None:
+                # Check if this is a standalone integer that might need decimal reconstruction
+                if quantity == int(quantity) and row is not None and qty_idx is not None:
+                    # Look for decimal part in adjacent columns
+                    decimal_part = self._find_adjacent_decimal_part(
+                        row, qty_idx)
+                    if decimal_part is not None:
+                        return float(f"{int(quantity)}.{decimal_part}")
+                return quantity
+
+            # Look for decimal patterns in the cell
+            decimal_match = re.search(r'(\d+)\.(\d+)', qty_text)
+            if decimal_match:
+                try:
+                    return float(decimal_match.group(0))
+                except ValueError:
+                    pass
+
+        except Exception as e:
+            logger.warning(f"Error extracting Kitakami quantity: {str(e)}")
+
+        return 0.0
+
+    def _find_adjacent_decimal_part(self, row: List, qty_idx: int) -> Optional[str]:
+        """
+        Find decimal part in adjacent columns for Kitakami quantity reconstruction.
+        Looks for patterns like "0.5", "0.06", "0.006" in adjacent cells.
+        Also handles cases where decimal part starts with "." like ".06"
+        Only checks immediately adjacent columns to avoid false matches from item descriptions.
+        """
+        try:
+            # Only check immediately adjacent columns (left and right)
+            for offset in [-1, 1]:
+                check_idx = qty_idx + offset
+                if 0 <= check_idx < len(row) and row[check_idx]:
+                    cell_text = self._normalize_text(str(row[check_idx]))
+
+                    # Skip if the cell contains text that looks like item description
+                    if self._is_description_text(cell_text):
+                        continue
+
+                    # Look for decimal patterns starting with "0."
+                    decimal_match = re.search(r'0\.(\d+)', cell_text)
+                    if decimal_match:
+                        return decimal_match.group(1)
+
+                    # Look for decimal patterns starting with "."
+                    dot_decimal_match = re.search(r'\.(\d+)', cell_text)
+                    if dot_decimal_match:
+                        return dot_decimal_match.group(1)
+
+                    # Look for patterns like "5", "06", "006" that could be decimal parts
+                    if re.match(r'^\d+$', cell_text):
+                        # If it's a small number, it might be a decimal part
+                        if len(cell_text) <= 3:  # 0.5, 0.06, 0.006
+                            return cell_text
+
+        except Exception as e:
+            logger.warning(f"Error finding adjacent decimal part: {str(e)}")
+
+        return None
+
+    def _is_description_text(self, text: str) -> bool:
+        """
+        Check if text looks like item description rather than a quantity.
+        Returns True if the text contains description-like patterns.
+        """
+        if not text:
+            return False
+
+        # Check for patterns that indicate this is description text
+        description_patterns = [
+            r'[A-Za-z]',  # Contains letters
+            r'[=]',       # Contains equals sign (like L=12.46m)
+            r'[()]',      # Contains parentheses (like (40t))
+            r'[kN]',      # Contains units like kN
+            r'[m]',       # Contains units like m
+            r'[t]',       # Contains units like t
+            r'[号]',      # Contains Japanese characters
+            r'[明]',      # Contains Japanese characters
+        ]
+
+        for pattern in description_patterns:
+            if re.search(pattern, text):
+                return True
+
+        return False
+
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text by removing spaces and handling full-width/half-width."""
+        if not text:
+            return ""
+        # Remove all spaces and normalize
+        return re.sub(r'\s+', '', str(text))
+
+    def _extract_number_from_text(self, text: str) -> Optional[float]:
+        """Extract number from text."""
+        if not text:
+            return None
+
+        # Look for decimal numbers
+        decimal_match = re.search(r'(\d+\.?\d*)', text)
+        if decimal_match:
+            try:
+                return float(decimal_match.group(1))
+            except ValueError:
+                pass
+
+        return None
 
     def extract_subtables_with_range(self, pdf_path: str, start_page: Optional[int] = None, end_page: Optional[int] = None, reference_numbers: Optional[List[str]] = None) -> List[SubtableItem]:
         """
