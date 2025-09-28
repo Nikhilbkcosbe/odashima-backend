@@ -42,16 +42,25 @@ def normalize_text(text: str) -> str:
 
 def find_reference_number_pattern(text: str) -> bool:
     """
-    Check if text matches the reference number pattern: kanji + Number + 号
-    Examples: 内1号, 内2号, etc.
+    Returns True if text contains a reference pattern anywhere (kanji + digits + 号).
     """
     if not text:
         return False
-
     normalized = normalize_text(text)
-    # Pattern: one or more kanji characters followed by number(s) followed by 号
     pattern = r'[\u4e00-\u9faf]+\d+号'
     return bool(re.search(pattern, normalized))
+
+
+def find_reference_number_standalone(text: str) -> bool:
+    """
+    Returns True only if the entire cell is exactly a reference (standalone),
+    i.e., matches ^[Kanji]+[digits]+号$ with no surrounding characters.
+    """
+    if not text:
+        return False
+    normalized = normalize_text(text)
+    pattern = r'^[\u4e00-\u9faf]+\d+号$'
+    return bool(re.match(pattern, normalized))
 
 
 def find_column_headers_and_positions(df: pd.DataFrame, start_row: int) -> Tuple[Optional[int], Dict[str, int]]:
@@ -137,7 +146,7 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
 
         # Check if we've reached another reference number (only in typical header positions)
         for col_idx, cell_value in enumerate(row_data):
-            if col_idx <= 3 and find_reference_number_pattern(str(cell_value)):
+            if col_idx <= 3 and find_reference_number_standalone(str(cell_value)):
                 logger.debug(
                     f"Found next reference number at row {current_row}, stopping extraction")
                 return data_rows
@@ -292,8 +301,8 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
 
             for col_idx, cell_value in enumerate(row_data):
                 # Only look for reference numbers in typical header positions (columns 0-3)
-                # This avoids false positives from reference codes in remarks columns
-                if col_idx <= 3 and find_reference_number_pattern(str(cell_value)):
+                # For Kitakami requirement: references must be standalone cell values
+                if col_idx <= 3 and find_reference_number_standalone(str(cell_value)):
                     reference_number = str(cell_value).strip()
                     print(
                         f"DEBUG: Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
