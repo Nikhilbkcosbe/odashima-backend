@@ -8,6 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import Border
 import numpy as np
 import tempfile
+import unicodedata
+import re
 
 from ..schemas.tender import TenderItem, SubtableItem
 
@@ -1122,7 +1124,10 @@ class ExcelTableExtractorService:
                 if amount_str:
                     raw_fields["金額"] = amount_str
                 if remarks:
-                    raw_fields["摘要"] = remarks
+                    # Normalize 摘要 by unifying width and removing all spaces (full/half)
+                    normalized_tekiyo = self._normalize_text_field(
+                        str(remarks))
+                    raw_fields["摘要"] = normalized_tekiyo
 
                 # Create TenderItem
                 tender_item = TenderItem(
@@ -1149,6 +1154,17 @@ class ExcelTableExtractorService:
         logger.info(
             f"Successfully converted {len(tender_items)} items from table {table_idx + 1}")
         return tender_items
+
+    def _normalize_text_field(self, text: str) -> str:
+        """Normalize text by NFKC and remove all whitespace (incl. full-width)."""
+        if text is None:
+            return ""
+        try:
+            normalized = unicodedata.normalize('NFKC', str(text))
+        except Exception:
+            normalized = str(text)
+        # Remove all whitespace including ideographic spaces
+        return re.sub(r"\s+", "", normalized)
 
     def _convert_subtable_data_to_items(self, data_rows, ref_number, sheet_name):
         """
