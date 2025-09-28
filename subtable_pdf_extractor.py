@@ -689,19 +689,28 @@ class SubtablePDFExtractor:
                 return main_num
 
             # Look for decimal part in immediate neighbors
-            decimal_part = self._find_adjacent_decimal_part(row, qty_idx)
-            if decimal_part is not None:
+            neighbor = self._find_adjacent_decimal_part(row, qty_idx)
+            if neighbor is not None:
                 try:
-                    # Ensure integer portion is int-like
+                    # neighbor may be (digits, is_negative)
+                    if isinstance(neighbor, tuple):
+                        digits, neg_from_neighbor = neighbor
+                    else:
+                        digits, neg_from_neighbor = neighbor, False
+
                     integer_part = str(int(float(main_num)))
-                    return f"{integer_part}.{decimal_part}"
+                    is_negative = integer_part.startswith(
+                        '-') or neg_from_neighbor
+                    integer_abs = integer_part.lstrip('-')
+                    sign = '-' if is_negative else ''
+                    return f"{sign}{integer_abs}.{digits}"
                 except Exception:
                     return main_num
             return main_num
         except Exception:
             return ""
 
-    def _find_adjacent_decimal_part(self, row: List[str], qty_idx: int) -> Optional[str]:
+    def _find_adjacent_decimal_part(self, row: List[str], qty_idx: int) -> Optional[tuple[str, bool]]:
         for offset in [-1, 1]:
             check_idx = qty_idx + offset
             if 0 <= check_idx < len(row) and row[check_idx]:
@@ -709,20 +718,24 @@ class SubtablePDFExtractor:
                 # If looks like description with letters/kanji/units, skip
                 if re.search(r"[A-Za-z一-龯号mktN明]", t):
                     continue
-                # .xx or 0.xx
+                # .xx or 0.xx (allow optional leading minus)
                 m = re.search(r"^0\.(\d+)$", t)
                 if m:
-                    return m.group(1)
+                    return (m.group(1), t.startswith('-'))
                 m = re.search(r"^\.(\d+)$", t)
                 if m:
-                    return m.group(1)
-                # Pure digits up to 3 chars → decimal digits
-                if re.match(r"^\d{1,3}$", t):
-                    return t
+                    return (m.group(1), t.startswith('-'))
+                # -0.xx
+                m = re.search(r"^-0\.(\d+)$", t)
+                if m:
+                    return (m.group(1), True)
+                # Pure digits up to 3 chars (allow optional leading '-') → decimal digits
+                if re.match(r"^-?\d{1,3}$", t):
+                    return (t.lstrip('-'), t.startswith('-'))
         return None
 
     def _extract_first_number(self, text: str) -> Optional[str]:
-        m = re.search(r"\d+(?:\.\d+)?", text)
+        m = re.search(r"-?\d+(?:\.\d+)?", text)
         return m.group(0) if m else None
 
     def _extract_unit_value(self, cell_text: str) -> str:
