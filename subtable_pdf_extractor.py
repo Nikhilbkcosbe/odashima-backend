@@ -145,7 +145,7 @@ class SubtablePDFExtractor:
                     return page_subtables
 
                 table_subtables = self._extract_subtables_from_table(
-                    table, reference_numbers, page_num, table_idx
+                    table, reference_numbers, page_num, table_idx, page.extract_text()
                 )
                 page_subtables.extend(table_subtables)
 
@@ -204,7 +204,7 @@ class SubtablePDFExtractor:
         return refs
 
     def _extract_subtables_from_table(self, table: List[List[str]], reference_numbers: List[str],
-                                      page_num: int, table_idx: int) -> List[Dict[str, Any]]:
+                                      page_num: int, table_idx: int, page_text: Optional[str] = None) -> List[Dict[str, Any]]:
         """Extract subtables from a single table."""
         if not table or len(table) < 5:
             return []
@@ -341,12 +341,20 @@ class SubtablePDFExtractor:
                     current_reference = found_reference
                     current_column_mapping = column_mapping
                     # Determine Kitakami-like context for this subtable
-                    current_is_kitakami = '明細単価番号' in (
-                        current_column_mapping or {})
+                    # Trigger for either presence of '明細単価番号' column OR Kitakami-style reference pattern '第<digits>号<kanji>'
+                    kitakami_ref = False
+                    try:
+                        kitakami_ref = bool(
+                            re.match(r"^第\s*([0-9０-９]+)\s*号\s*([一-龯])$", str(found_reference or "")))
+                    except Exception:
+                        kitakami_ref = False
+                    current_is_kitakami = ('明細単価番号' in (
+                        current_column_mapping or {})) or kitakami_ref
 
                     # Extract table title from the reference row
                     table_title = extract_pdf_table_title_items(
-                        table, row_idx, header_row_idx)
+                        table, row_idx, header_row_idx, kitakami_mode=current_is_kitakami,
+                        page_text=page_text, reference_value=found_reference)
                     if table_title:
                         current_table_title = table_title
                         logger.info(
@@ -737,6 +745,121 @@ class SubtablePDFExtractor:
     def _extract_first_number(self, text: str) -> Optional[str]:
         m = re.search(r"-?\d+(?:\.\d+)?", text)
         return m.group(0) if m else None
+
+    def _infer_quantity_fallback(self, row: List[str], column_mapping: Dict[str, int], table: List[List[str]], row_idx: int) -> str:
+        """Infer quantity when '数量' header could not be mapped. Prefer the cell right after the unit column; else use first numeric-looking cell not in 金額/単価 columns, with adjacent decimal merge."""
+        try:
+            unit_idx = column_mapping.get('単位', -1)
+            price_idx = column_mapping.get('単価', -1)
+            amount_idx = column_mapping.get('金額', -1)
+
+            # 1) If unit column is known, assume quantity is the next column
+            if unit_idx != -1:
+                assumed_qty_idx = unit_idx + 1
+                if assumed_qty_idx < len(row) and row[assumed_qty_idx]:
+                    merged = self._merge_quantity_with_adjacent(
+                        row, assumed_qty_idx)
+                    if merged:
+                        return merged
+                # Lookahead rows for the same assumed column
+                for la in range(1, 5):
+                    la_idx = row_idx + la
+                    if la_idx >= len(table):
+                        break
+                    la_row = table[la_idx]
+                    if assumed_qty_idx < len(la_row) and la_row[assumed_qty_idx]:
+                        merged = self._merge_quantity_with_adjacent(
+                            la_row, assumed_qty_idx)
+                        if merged:
+                            return merged
+
+            # 2) Otherwise, scan the row for a plausible numeric quantity
+            for col_i, cell in enumerate(row):
+                if cell is None:
+                    continue
+                if col_i in [price_idx, amount_idx]:
+                    continue
+                text = self._normalize_simple(str(cell))
+                # Skip description-like cells
+                if re.search(r"[A-Za-z一-龯号明mktN]", text):
+                    continue
+                num = self._extract_first_number(text)
+                if num:
+                    # Avoid huge money-like numbers with many digits
+                    try:
+                        val = float(num)
+                        if val > 100000:  # likely 金額
+                            continue
+                    except Exception:
+                        pass
+                    # Try to merge adjacent decimal fragments
+                    merged = num
+                    if '.' not in num:
+                        neighbor = self._find_adjacent_decimal_part(row, col_i)
+                        if neighbor is not None:
+                            digits, neg = (neighbor if isinstance(
+                                neighbor, tuple) else (neighbor, False))
+                            sign = '-' if neg else ''
+                            merged = f"{sign}{str(int(float(num))).lstrip('-')}.{digits}"
+                    return merged
+        except Exception:
+            return ""
+        return ""
+
+    def _infer_unit_fallback(self, row: List[str], column_mapping: Dict[str, int], table: List[List[str]], row_idx: int) -> str:
+        """Infer unit when '単位' header could not be mapped by scanning nearby cells for plausible unit tokens."""
+        try:
+            name_idx = column_mapping.get('名称・規格', -1)
+            unit_idx = column_mapping.get('単位', -1)
+            # Known unit tokens (normalized)
+            unit_variants = [
+                'm', 'ｍ', 'm2', 'ｍ2', 'm3', 'ｍ3', 'm²', 'ｍ²', 'm³', 'ｍ³',
+                '式', '一式', '1式', '枚', '人', '基', '台', '個', '本', '箇所', 't', 'ｔ', 'kN', 'kn', '時間', 'h', 'H'
+            ]
+
+            def looks_like_unit(text: str) -> bool:
+                if not text:
+                    return False
+                t = text.strip()
+                if len(t) > 6:
+                    return False
+                # Exact match any variant
+                return t in unit_variants
+
+            # 1) If unit column position is known but empty in current row, check lookahead same column
+            if unit_idx != -1:
+                if unit_idx < len(row) and row[unit_idx] and looks_like_unit(str(row[unit_idx])):
+                    return str(row[unit_idx]).strip()
+                for la in range(1, 5):
+                    la_idx = row_idx + la
+                    if la_idx >= len(table):
+                        break
+                    la_row = table[la_idx]
+                    if unit_idx < len(la_row) and la_row[unit_idx] and looks_like_unit(str(la_row[unit_idx])):
+                        return str(la_row[unit_idx]).strip()
+
+            # 2) Scan the same row for a plausible unit (exclude name col)
+            for col_i, cell in enumerate(row):
+                if cell is None:
+                    continue
+                if col_i == name_idx:
+                    continue
+                cell_str = str(cell).strip()
+                if looks_like_unit(cell_str):
+                    return cell_str
+
+            # 3) If still not found, check immediate neighbors around an inferred quantity column
+            qty_idx = column_mapping.get('数量', -1)
+            if qty_idx == -1 and unit_idx != -1:
+                qty_idx = unit_idx + 1
+            if qty_idx != -1:
+                for off in [-2, -1, 1, 2]:
+                    ci = qty_idx + off
+                    if 0 <= ci < len(row) and row[ci] and looks_like_unit(str(row[ci]).strip()):
+                        return str(row[ci]).strip()
+        except Exception:
+            return ""
+        return ""
 
     def _extract_unit_value(self, cell_text: str) -> str:
         """

@@ -211,6 +211,10 @@ def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[b
     pdf_unit_normalized = normalize_text(pdf_unit.lower())
     pdf_unit_quantity_normalized = normalize_text(pdf_unit_quantity.lower())
 
+    # Strict requirement: both unit and quantity must exist in PDF title to consider a match
+    if not pdf_unit_normalized or not pdf_unit_quantity_normalized:
+        return False, "PDF missing unit and/or quantity"
+
     # STRICT LOGIC: Check each component with stricter matching
 
     # 1. Check item name: 1st or 2nd part of PDF item name anywhere in Excel title
@@ -254,34 +258,18 @@ def check_title_match_with_pdf_data(excel_title: str, pdf_data: Dict) -> Tuple[b
     else:
         item_match = True  # If no item name in PDF, consider it a match
 
-    # 2. Check unit: PDF unit MUST be present in Excel title string
-    unit_match = False
-    if pdf_unit_normalized:
-        # PDF unit MUST be found in Excel title string
-        if pdf_unit_normalized in excel_title_normalized:
-            unit_match = True
-        else:
-            unit_match = False  # If PDF has unit but Excel title doesn't contain it, it's a mismatch
+    # 2. Check unit: PDF unit MUST be present in Excel title string (we already ensured it's present)
+    if pdf_unit_normalized in excel_title_normalized:
+        unit_match = True
     else:
-        unit_match = True  # If no unit in PDF, consider it a match
+        unit_match = False
 
     # 3. Check unit quantity: Use STRICT adjacent pattern matching
-    quantity_match = False
-    if pdf_unit_quantity_normalized and pdf_unit_normalized:
-        # Use the new strict adjacent pattern matching
-        if check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity_normalized, pdf_unit_normalized, excel_title_normalized):
-            quantity_match = True
-        else:
-            # No fallback to flexible matching - if adjacent pattern doesn't match, it's a mismatch
-            quantity_match = False
-    elif pdf_unit_quantity_normalized:
-        # If we have quantity but no unit, use the original flexible matching
-        if check_unit_quantity_presence_in_excel_title(pdf_unit_quantity_normalized, excel_title_normalized):
-            quantity_match = True
-        else:
-            quantity_match = False
+    # Quantity must be adjacent to unit in Excel title (strict)
+    if check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity_normalized, pdf_unit_normalized, excel_title_normalized):
+        quantity_match = True
     else:
-        quantity_match = True  # If no quantity in PDF, consider it a match
+        quantity_match = False
 
     # UNIT & QUANTITY ONLY: Only check unit and unit quantity
     # Both unit and quantity must match
@@ -328,7 +316,6 @@ def compare_subtable_titles(pdf_subtable, excel_subtable) -> Dict:
         "excel_reference": excel_ref,
         "pdf_title": pdf_title,
         "excel_title": excel_title,
-        "item_name_match": False,
         "unit_match": False,
         "unit_quantity_match": False,
         "overall_match": False,
@@ -352,12 +339,30 @@ def compare_subtable_titles(pdf_subtable, excel_subtable) -> Dict:
     else:
         excel_title_text = str(excel_title)
 
-    # Use the improved comparison logic with actual PDF data
-    is_match, match_type = check_title_match_with_pdf_data(
-        excel_title_text, pdf_title)
+    # Get PDF unit and quantity
+    pdf_unit = pdf_title.get('unit', '') if isinstance(pdf_title, dict) else ''
+    pdf_qty = pdf_title.get('unit_quantity', '') if isinstance(
+        pdf_title, dict) else ''
+
+    # If PDF is missing unit/quantity, cannot compare
+    if not pdf_unit or not pdf_qty:
+        result["details"]["reason"] = "PDF missing unit and/or quantity"
+        return result
+
+    # Requirement: Excel title must contain quantity first and then unit (after normalization)
+    is_adjacent = check_adjacent_unit_quantity_unit_pattern(
+        pdf_qty, pdf_unit, excel_title_text)
+    if is_adjacent:
+        is_match, match_type = True, "Excel title contains '<qty><unit>'"
+    else:
+        is_match, match_type = False, "Excel title missing '<qty><unit>'"
 
     result["overall_match"] = is_match
     result["details"]["reason"] = match_type
+
+    # Update detail flags for clarity (true only when adjacency matched)
+    result["unit_match"] = is_adjacent
+    result["unit_quantity_match"] = is_adjacent
 
     # Set match score based on result
     if is_match:
@@ -396,11 +401,28 @@ def compare_all_subtable_titles(pdf_path: str, excel_path: str, pdf_start_page: 
         logger.info(
             f"Found {len(pdf_subtables)} PDF subtables and {len(excel_subtables)} Excel subtables")
 
-        # Create reference number mappings
-        pdf_by_ref = {subtable["reference_number"]
-            : subtable for subtable in pdf_subtables if "table_title" in subtable}
-        excel_by_ref = {subtable["reference_number"]
-            : subtable for subtable in excel_subtables if "table_title" in subtable}
+        # Create reference number mappings with Kitakami equivalence (e.g., 第3号明 == 明3号)
+        def norm_ref(r: str) -> str:
+            if not r:
+                return ""
+            return re.sub(r"[\s　]+", "", str(r))
+
+        def kitakami_key(r: str) -> str:
+            r = norm_ref(r)
+            m_pdf = re.match(r'^第?(\d+)号([一-龯])$', r)
+            if m_pdf:
+                num, tail = m_pdf.group(1), m_pdf.group(2)
+                return f"{tail}:{num}"
+            m_excel = re.match(r'^([一-龯])(\d+)号$', r)
+            if m_excel:
+                tail, num = m_excel.group(1), m_excel.group(2)
+                return f"{tail}:{num}"
+            return r
+
+        pdf_by_ref = {kitakami_key(subtable["reference_number"]): subtable
+                      for subtable in pdf_subtables if "reference_number" in subtable}
+        excel_by_ref = {kitakami_key(subtable["reference_number"]): subtable
+                        for subtable in excel_subtables if "reference_number" in subtable}
 
         logger.info(f"PDF subtables with titles: {len(pdf_by_ref)}")
         logger.info(f"Excel subtables with titles: {len(excel_by_ref)}")
@@ -482,21 +504,41 @@ def compare_all_subtable_titles_from_cached_data(pdf_subtables: List, excel_subt
         logger.info(
             f"Found {len(pdf_subtables)} PDF subtables and {len(excel_subtables)} Excel subtables")
 
-        # Create reference number mappings - handle both SubtableItem objects and dictionaries
+        # Create reference number mappings with Kitakami equivalence (e.g., 第3号明 == 明3号)
+        def norm_ref(r: str) -> str:
+            if not r:
+                return ""
+            return re.sub(r"[\s　]+", "", str(r))
+
+        def kitakami_key(r: str) -> str:
+            r = norm_ref(r)
+            m_pdf = re.match(r'^第?(\d+)号([一-龯])$', r)
+            if m_pdf:
+                num, tail = m_pdf.group(1), m_pdf.group(2)
+                return f"{tail}:{num}"
+            m_excel = re.match(r'^([一-龯])(\d+)号$', r)
+            if m_excel:
+                tail, num = m_excel.group(1), m_excel.group(2)
+                return f"{tail}:{num}"
+            return r
+
         pdf_by_ref = {}
         excel_by_ref = {}
 
         for subtable in pdf_subtables:
-            if hasattr(subtable, 'reference_number') and hasattr(subtable, 'table_title') and subtable.table_title:
-                pdf_by_ref[subtable.reference_number] = subtable
-            elif isinstance(subtable, dict) and subtable.get("reference_number") and subtable.get("table_title"):
-                pdf_by_ref[subtable["reference_number"]] = subtable
+            if hasattr(subtable, 'reference_number'):
+                pdf_by_ref[kitakami_key(subtable.reference_number)] = subtable
+            elif isinstance(subtable, dict) and subtable.get("reference_number"):
+                pdf_by_ref[kitakami_key(
+                    subtable["reference_number"])] = subtable
 
         for subtable in excel_subtables:
-            if hasattr(subtable, 'reference_number') and hasattr(subtable, 'table_title') and subtable.table_title:
-                excel_by_ref[subtable.reference_number] = subtable
-            elif isinstance(subtable, dict) and subtable.get("reference_number") and subtable.get("table_title"):
-                excel_by_ref[subtable["reference_number"]] = subtable
+            if hasattr(subtable, 'reference_number'):
+                excel_by_ref[kitakami_key(
+                    subtable.reference_number)] = subtable
+            elif isinstance(subtable, dict) and subtable.get("reference_number"):
+                excel_by_ref[kitakami_key(
+                    subtable["reference_number"])] = subtable
 
         logger.info(f"PDF subtables with titles: {len(pdf_by_ref)}")
         logger.info(f"Excel subtables with titles: {len(excel_by_ref)}")
