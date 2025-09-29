@@ -147,9 +147,8 @@ def check_unit_quantity_presence_in_excel_title(pdf_unit_quantity: str, excel_ti
 
 def check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity: str, pdf_unit: str, excel_title: str) -> bool:
     """
-    Check if PDF unit quantity and unit appear adjacent to each other in Excel title.
-    This is a stricter check that looks for patterns like "10m2", "10m", "5本", etc.
-    Uses word boundary matching to prevent substring issues like "5本" matching "15本".
+    Check if PDF quantity+unit substring appears in the Excel title with quantity on the left and unit on the right.
+    Per your rule, treat it as a match if the normalized Excel title contains the normalized '<qty><unit>' substring.
     """
     if not pdf_unit_quantity or not pdf_unit or not excel_title:
         return False
@@ -158,36 +157,21 @@ def check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity: str, pdf_unit: 
     normalized_pdf_unit = normalize_text(pdf_unit)
     normalized_excel_title = normalize_text(excel_title)
 
-    # Create the adjacent pattern: quantity + unit
+    # Simple substring per requirement
     adjacent_pattern = normalized_pdf_qty + normalized_pdf_unit
-
-    # Use regex with word boundaries to prevent substring matching
-    # This ensures "5本" doesn't match "15本"
-    import re
-
-    # Create a regex pattern that matches the quantity+unit as a complete word
-    # The pattern should be preceded by a non-digit and followed by a non-digit or end of string
-    regex_pattern = r'(?<!\d)' + re.escape(adjacent_pattern) + r'(?!\d)'
-
-    if re.search(regex_pattern, normalized_excel_title):
+    if adjacent_pattern in normalized_excel_title:
         return True
 
-    # Try with comma variations for quantity
+    # Accept quantity without comma variation
     qty_without_comma = normalized_pdf_qty.replace(',', '')
-    adjacent_pattern_no_comma = qty_without_comma + normalized_pdf_unit
-    regex_pattern_no_comma = r'(?<!\d)' + \
-        re.escape(adjacent_pattern_no_comma) + r'(?!\d)'
-    if re.search(regex_pattern_no_comma, normalized_excel_title):
+    if qty_without_comma + normalized_pdf_unit in normalized_excel_title:
         return True
 
-    # Try with comma for thousands
+    # Accept thousands with comma variation (e.g., 1000 -> 1,000)
     if ',' not in normalized_pdf_qty and len(normalized_pdf_qty) >= 4:
         qty_with_comma = normalized_pdf_qty[:-
                                             3] + ',' + normalized_pdf_qty[-3:]
-        adjacent_pattern_with_comma = qty_with_comma + normalized_pdf_unit
-        regex_pattern_with_comma = r'(?<!\d)' + \
-            re.escape(adjacent_pattern_with_comma) + r'(?!\d)'
-        if re.search(regex_pattern_with_comma, normalized_excel_title):
+        if qty_with_comma + normalized_pdf_unit in normalized_excel_title:
             return True
 
     return False

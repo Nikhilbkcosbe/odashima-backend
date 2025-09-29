@@ -286,8 +286,9 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
             raise ValueError(
                 "Both excel_file_path and sheet_name are required")
 
-        # Read the Excel sheet
-        df = pd.read_excel(excel_file_path, sheet_name=sheet_name, header=None)
+        # Read the Excel sheet (force openpyxl engine for .xlsx compatibility)
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name,
+                           header=None, engine='openpyxl')
         logger.info(
             f"Successfully loaded sheet '{sheet_name}' with {len(df)} rows and {len(df.columns)} columns")
 
@@ -377,6 +378,8 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                             f"DEBUG: Header row is None for {reference_number}")
                         logger.warning(
                             f"Header row is None for {reference_number} - skipping")
+                        # Avoid getting stuck on the same row; advance to next row
+                        current_row += 1
                         break
             else:
                 current_row += 1
@@ -405,8 +408,9 @@ def extract_subtables_from_excel(excel_file_path: str, sheet_name: str = None) -
     """
     try:
         # Get all sheet names
-        xl_file = pd.ExcelFile(excel_file_path)
-        all_sheets = xl_file.sheet_names
+        xl_file = pd.ExcelFile(excel_file_path, engine='openpyxl')
+        all_sheets = [s for s in xl_file.sheet_names if isinstance(
+            s, str) and s.strip()]
         logger.info(f"Available sheets in Excel file: {all_sheets}")
 
         if sheet_name:

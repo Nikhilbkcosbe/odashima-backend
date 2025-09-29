@@ -13,14 +13,14 @@ import re
 
 from ..schemas.tender import TenderItem, SubtableItem
 
-# Import SubtableItem using absolute path to avoid import issues
+# Ensure backend directory is first on sys.path BEFORE importing excel_subtable_api
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
-# Import the new API-ready subtable extractor
 backend_dir = os.path.join(os.path.dirname(__file__), '..', '..')
-sys.path.insert(0, backend_dir)
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+# Import the new API-ready subtable extractor (from backend/excel_subtable_api.py)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

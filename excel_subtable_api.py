@@ -3,12 +3,19 @@ API-Ready Excel Subtable Extractor
 Extracts all subtables from all remaining sheets (except main sheet) of an Excel file
 """
 
+from excel_subtable_extractor import extract_subtables_from_excel
 import pandas as pd
 import logging
 from typing import List, Dict, Any, Optional
 
+# Ensure backend directory is on sys.path for reliable imports
+import sys
+import os
+_BACKEND_DIR = os.path.dirname(__file__)
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 # Import the local excel_subtable_extractor (now in backend directory)
-from excel_subtable_extractor import extract_subtables_from_excel
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -35,9 +42,10 @@ def extract_all_subtables_api(excel_file_path: str) -> Dict[str, Any]:
     """
 
     try:
-        # Load Excel file and get sheet names
-        xl_file = pd.ExcelFile(excel_file_path)
-        all_sheet_names = xl_file.sheet_names
+        # Load Excel file and get sheet names (force openpyxl engine for .xlsx)
+        xl_file = pd.ExcelFile(excel_file_path, engine='openpyxl')
+        all_sheet_names = [
+            s for s in xl_file.sheet_names if isinstance(s, str) and s.strip()]
 
         if len(all_sheet_names) < 2:
             return {
@@ -54,6 +62,14 @@ def extract_all_subtables_api(excel_file_path: str) -> Dict[str, Any]:
         # Skip the main sheet (first sheet) and process remaining sheets
         main_sheet = all_sheet_names[0]
         remaining_sheets = all_sheet_names[1:]
+        # Robustness: de-duplicate while keeping order
+        seen = set()
+        deduped_remaining = []
+        for s in remaining_sheets:
+            if s not in seen:
+                deduped_remaining.append(s)
+                seen.add(s)
+        remaining_sheets = deduped_remaining
 
         logger.info(f"Processing Excel file: {excel_file_path}")
         logger.info(f"Main sheet (skipped): {main_sheet}")
@@ -127,7 +143,7 @@ def extract_all_subtables_api(excel_file_path: str) -> Dict[str, Any]:
 
             except Exception as sheet_error:
                 logger.error(
-                    f"Error processing sheet '{sheet_name}': {sheet_error}")
+                    "Error processing sheet '%s': %s", sheet_name, sheet_error)
 
                 # Add failed sheet result
                 sheet_result = {
