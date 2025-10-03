@@ -161,7 +161,7 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
         general_item = general_item if general_item != 'nan' else ""
         specific_item = specific_item if specific_item != 'nan' else ""
 
-        # Extract data from specific columns
+        # Extract data from specific columns (keep unit as text; do not normalize numbers)
         unit = str(row_data.iloc[unit_col]).strip(
         ) if unit_col < len(row_data) else ""
         quantity = str(row_data.iloc[quantity_col]).strip(
@@ -206,13 +206,13 @@ def extract_subtable_data(df: pd.DataFrame, header_row: int, column_positions: D
             next_unit_price = clean_value(next_unit_price)
             next_amount = clean_value(next_amount)
 
-            # Merge if next row has data (with or without specific item name)
+            # Restore original stable merge (Excel logic unchanged as per request)
             if next_specific_item or next_unit or next_quantity or next_unit_price or next_amount:
                 # Combine general and specific item names (if specific item exists)
                 if next_specific_item:
                     item_name = f"{general_item} {next_specific_item}".strip()
                 else:
-                    item_name = general_item  # Use only general item if no specific item
+                    item_name = general_item
                 unit = next_unit
                 quantity = next_quantity
                 unit_price = next_unit_price

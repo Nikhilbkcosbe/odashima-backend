@@ -591,16 +591,25 @@ class SubtablePDFExtractor:
                     lookahead_row = table[lookahead_idx]
 
                     # Stop if we hit another item name or 合計
-                    if lookahead_row[0]:
-                        cell_text = str(lookahead_row[0]).strip()
-                        if ('合計' in cell_text or
-                            (kitakami_mode and self._normalize_simple(cell_text) == '計') or
-                            (len(cell_text) > 2 and cell_text != item_name and
-                             cell_text not in ["", "名称・規格", "単位", "数量", "摘要"])):
-                            if is_debug:
-                                logger.info(
-                                    f"🎯 DEBUG: Stopping lookahead at row {lookahead_idx}: '{cell_text}'")
-                            break
+                    # Use the mapped '名称・規格' column (not just column 0) to detect new items
+                    next_item_name = ""
+                    name_col_idx = column_mapping.get('名称・規格', -1)
+                    if name_col_idx != -1 and name_col_idx < len(lookahead_row) and lookahead_row[name_col_idx]:
+                        candidate = str(lookahead_row[name_col_idx]).strip()
+                        if candidate and candidate not in ["名称・規格", "単位", "数量", "摘要"]:
+                            next_item_name = candidate
+
+                    first_cell_text = str(lookahead_row[0]).strip(
+                    ) if lookahead_row and lookahead_row[0] else ""
+
+                    if ('合計' in first_cell_text or
+                        (kitakami_mode and self._normalize_simple(first_cell_text) == '計') or
+                            (next_item_name and next_item_name != item_name)):
+                        if is_debug:
+                            stop_reason = next_item_name if next_item_name else first_cell_text
+                            logger.info(
+                                f"🎯 DEBUG: Stopping lookahead at row {lookahead_idx}: '{stop_reason}'")
+                        break
 
                     # Look for missing unit/quantity/remarks/code in this lookahead row
                     found_data = False
@@ -677,7 +686,8 @@ class SubtablePDFExtractor:
             normalized = unicodedata.normalize('NFKC', text)
         except Exception:
             normalized = text
-        return re.sub(r"[\s\u3000]+", "", normalized)
+        # Also strip thousand separators (comma variants) so "1,000" -> "1000"
+        return re.sub(r"[\s\u3000,，]+", "", normalized)
 
     # --- Kitakami quantity merge helpers ---
     def _merge_quantity_with_adjacent(self, row: List[str], qty_idx: int) -> str:
@@ -743,7 +753,10 @@ class SubtablePDFExtractor:
         return None
 
     def _extract_first_number(self, text: str) -> Optional[str]:
-        m = re.search(r"-?\d+(?:\.\d+)?", text)
+        # Accept digits with optional thousand separators and optional decimal part
+        # Normalize commas before extracting
+        t = text.replace(',', '').replace('，', '') if text else text
+        m = re.search(r"-?\d+(?:\.\d+)?", t)
         return m.group(0) if m else None
 
     def _infer_quantity_fallback(self, row: List[str], column_mapping: Dict[str, int], table: List[List[str]], row_idx: int) -> str:

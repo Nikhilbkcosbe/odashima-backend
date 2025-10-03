@@ -733,20 +733,19 @@ class ExcelTableExtractorService:
 
         # Look for unit/quantity data in the next few rows (typically 1-3 rows after item name)
         for check_row in range(item_row + 1, min(item_row + 5, extractor.worksheet.max_row + 1)):
-            # Check for unit and quantity in the current row
+            # Accumulate continued name parts in the same columns before the unit column
+            if check_row != item_row:
+                for col in range(name_col + 1, unit_col):
+                    cell_value = extractor.get_cell_value(check_row, col + 1)
+                    if cell_value and isinstance(cell_value, str) and cell_value.strip():
+                        combined_name += " " + cell_value.strip()
+
             unit_value = extractor.get_cell_value(
                 check_row, unit_col + 1)  # Convert to 1-based
             quantity_value = extractor.get_cell_value(
                 check_row, quantity_col + 1)  # Convert to 1-based
 
-            # Also check for continued name parts in subsequent rows (same columns as above)
-            for col in range(name_col + 1, unit_col):
-                cell_value = extractor.get_cell_value(
-                    check_row, col + 1)  # Convert to 1-based
-                if cell_value and isinstance(cell_value, str) and cell_value.strip():
-                    combined_name += " " + cell_value.strip()
-
-            # If we found unit or quantity data, use it and stop
+            # If we found unit or quantity data, use it
             if (unit_value and isinstance(unit_value, str) and unit_value.strip()) or \
                (quantity_value and str(quantity_value).strip()):
 
@@ -759,8 +758,7 @@ class ExcelTableExtractorService:
                     except (ValueError, TypeError):
                         combined_quantity = 0.0
 
-                end_row = check_row
-                break
+            end_row = max(end_row, check_row)
 
         # ENHANCED: If no unit found in expected location, scan nearby cells more aggressively
         if not combined_unit:
