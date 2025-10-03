@@ -1,8 +1,8 @@
 import os
 import re
 import pdfplumber
-import json
-import pandas as pd
+import json  # noqa: F401 (kept for potential logging/serialization)
+import pandas as pd  # noqa: F401 (module used by other services/tests)
 
 
 class SpecFinalExtractor:
@@ -513,7 +513,6 @@ class SpecFinalExtractor:
         results['土捨て場'] = "Not Found"
         fukusanbutsu_headers = ['副産物名', '搬入再資源化施設名', '搬入場所', '備考']
         fukusanbutsu_data = []
-        found_fukusanbutsu = False
         for table in tables:
             if not table or not table[0]:
                 continue
@@ -527,7 +526,6 @@ class SpecFinalExtractor:
                         fukusanbutsu_data.append(
                             dict(zip(fukusanbutsu_headers, [str(c or '').strip() for c in padded_row])))
                 if fukusanbutsu_data:
-                    found_fukusanbutsu = True
                     break
         results['建設副産物'] = fukusanbutsu_data if fukusanbutsu_data else "Not Found"
         haikibutsu_headers = ['廃棄物名', '受入施設名', '受入場所', '備考']
@@ -546,7 +544,7 @@ class SpecFinalExtractor:
                             dict(zip(haikibutsu_headers, [str(c or '').strip() for c in padded_row])))
                 if haikibutsu_data:
                     break
-                results['建設廃棄物'] = haikibutsu_data if haikibutsu_data else "Not Found"
+        results['建設廃棄物'] = haikibutsu_data if haikibutsu_data else "Not Found"
         return results
 
     def extract_dai13jou(self):
