@@ -34,8 +34,8 @@ router = APIRouter()
 
 
 def validate_project_area(area: str):
-    """Validate that the project area is supported (岩手 or 北上市)"""
-    if area not in ["岩手", "北上市"]:
+    """Validate that the project area is supported (岩手, 北上市 or 農政)"""
+    if area not in ["岩手", "北上市", "農政"]:
         raise HTTPException(
             status_code=400,
             detail=f"サポートされていない地域です。選択された地域: {area}"
@@ -464,9 +464,7 @@ async def extract_and_cache_files(
 
         # Extract PDF main table items
         logger.info("Extracting PDF main table items...")
-        # Default to Iwate for this endpoint
-        project_area = '岩手'
-
+        # Use provided area (supports 岩手/北上市/農政)
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page, project_area)
         logger.info(f"Extracted {len(pdf_items)} PDF main table items")
@@ -489,7 +487,12 @@ async def extract_and_cache_files(
         # Extract subtables from both PDF and Excel
         logger.info("Extracting subtables from PDF...")
         pdf_subtables = pdf_parser.extract_subtables_with_range(
-            pdf_path, pdf_subtable_start_page, pdf_subtable_end_page
+            pdf_path,
+            # 農政ではメインと同じ範囲を使用
+            pdf_subtable_start_page if project_area != '農政' else start_page,
+            pdf_subtable_end_page if project_area != '農政' else end_page,
+            None,
+            project_area
         )
         logger.info(f"Extracted {len(pdf_subtables)} PDF subtable items")
 
@@ -1497,9 +1500,6 @@ async def compare_tender_files_missing_only(
         pdf_parser = PDFParser()
         excel_parser = ExcelParser()
 
-        # Default to Iwate for this endpoint
-        project_area = '岩手'
-
         pdf_items = pdf_parser.extract_tables_with_range(
             pdf_path, start_page, end_page, project_area)
 
@@ -1520,8 +1520,10 @@ async def compare_tender_files_missing_only(
         main_table_items = excel_items
         pdf_subtables = pdf_parser.extract_subtables_with_range(
             pdf_path,
-            pdf_subtable_start_page,
-            pdf_subtable_end_page
+            pdf_subtable_start_page if project_area != '農政' else start_page,
+            pdf_subtable_end_page if project_area != '農政' else end_page,
+            None,
+            project_area
         )
         logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
@@ -1699,8 +1701,10 @@ async def compare_tender_files_mismatches_only(
         main_table_items = excel_items
         pdf_subtables = pdf_parser.extract_subtables_with_range(
             pdf_path,
-            pdf_subtable_start_page,
-            pdf_subtable_end_page
+            pdf_subtable_start_page if project_area != '農政' else start_page,
+            pdf_subtable_end_page if project_area != '農政' else end_page,
+            None,
+            project_area
         )
         logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
@@ -2093,8 +2097,10 @@ async def compare_tender_files_extra_items_only(
         main_table_items = excel_items
         pdf_subtables = pdf_parser.extract_subtables_with_range(
             pdf_path,
-            pdf_subtable_start_page,
-            pdf_subtable_end_page
+            pdf_subtable_start_page if project_area != '農政' else start_page,
+            pdf_subtable_end_page if project_area != '農政' else end_page,
+            None,
+            project_area
         )
         logger.info("Using NEW API-ready Excel subtable extraction...")
         excel_subtables = excel_table_extractor.extract_subtables_from_buffer(
@@ -2322,7 +2328,12 @@ async def compare_subtables(
         # Extract subtables from PDF with page range and reference numbers
         logger.info("Extracting subtables from PDF with reference numbers...")
         pdf_subtables = pdf_parser.extract_subtables_with_range(
-            pdf_path, pdf_subtable_start_page, pdf_subtable_end_page, valid_references)
+            pdf_path,
+            pdf_subtable_start_page if project_area != '農政' else start_page,
+            pdf_subtable_end_page if project_area != '農政' else end_page,
+            valid_references,
+            project_area
+        )
         logger.info(f"Total PDF subtables extracted: {len(pdf_subtables)}")
 
         # Extract subtables from Excel using the NEW API-ready logic
@@ -2853,6 +2864,8 @@ async def compare_subtable_titles_cached_api(session_id: str = Form(...)) -> Dic
         # Extract cached subtable data
         pdf_subtables = cached_data.get('pdf_subtables', [])
         excel_subtables = cached_data.get('excel_subtables', [])
+        # Also pass main PDF items so Nousei titles can be derived from dotted headers
+        pdf_items = cached_data.get('pdf_items', [])
 
         if not pdf_subtables or not excel_subtables:
             raise HTTPException(
@@ -2865,7 +2878,7 @@ async def compare_subtable_titles_cached_api(session_id: str = Form(...)) -> Dic
 
         # Run title comparison using cached data
         full_result = compare_all_subtable_titles_from_cached_data(
-            pdf_subtables, excel_subtables)
+            pdf_subtables, excel_subtables, pdf_items)
 
         # Filter to only include mismatches and simplify the structure
         mismatches_only = []
@@ -2874,7 +2887,10 @@ async def compare_subtable_titles_cached_api(session_id: str = Form(...)) -> Dic
                 mismatch_data = {
                     "reference_number": comparison.get("pdf_reference", ""),
                     "pdf_title": comparison.get("pdf_title", {}),
-                    "excel_title": comparison.get("excel_title", "")
+                    "excel_title": comparison.get("excel_title", ""),
+                    # Include page number and PDF item name for Nousei format
+                    "pdf_page_number": comparison.get("pdf_page_number"),
+                    "pdf_item_name": comparison.get("pdf_item_name")
                 }
                 mismatches_only.append(mismatch_data)
 

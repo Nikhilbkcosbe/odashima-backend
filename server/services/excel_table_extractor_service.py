@@ -145,9 +145,9 @@ class ExcelTableExtractorService:
         NEW: Wrapper method using the API-ready subtable extractor.
         Extract subtables from Excel buffer using the optimized new API function.
         """
-        return self.extract_subtables_with_new_api(excel_buffer.getvalue())
+        return self.extract_subtables_with_new_api(excel_buffer.getvalue(), main_sheet_name)
 
-    def extract_subtables_with_new_api(self, file_content: bytes) -> List[SubtableItem]:
+    def extract_subtables_with_new_api(self, file_content: bytes, main_sheet_name: Optional[str] = None) -> List[SubtableItem]:
         """
         NEW: Extract subtables using the API-ready function and convert to SubtableItem format.
         This is the replacement for the old extraction logic.
@@ -162,7 +162,8 @@ class ExcelTableExtractorService:
         try:
             # Use the new API-ready subtable extractor
             logger.info("Using NEW API-ready subtable extractor...")
-            api_result = extract_all_subtables_api(tmp_file_path)
+            api_result = extract_all_subtables_api(
+                tmp_file_path, main_sheet_name)
 
             if not api_result.get("success", False):
                 logger.error(
@@ -309,15 +310,11 @@ class ExcelTableExtractorService:
                 for col in range(1, max_cols):
                     cell_value = worksheet.cell(row=row, column=col).value
                     if cell_value and isinstance(cell_value, str):
-                        # Look for 単X号 patterns
                         import re
-                        matches = re.findall(r'単\d+号', cell_value)
+                        text = cell_value
+                        # Accept Kanji + optional hyphen + digits + 号 (e.g., 内1号, 内-1号)
+                        matches = re.findall(r'[一-龯]+-?\d+号', text)
                         reference_numbers.update(matches)
-
-                        # Also look for other patterns like 内X号, 代X号, etc.
-                        other_matches = re.findall(
-                            r'[内代工材][0-9]+号', cell_value)
-                        reference_numbers.update(other_matches)
 
             workbook.close()
 

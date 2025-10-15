@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def extract_all_subtables_api(excel_file_path: str) -> Dict[str, Any]:
+def extract_all_subtables_api(excel_file_path: str, main_sheet_name: Optional[str] = None) -> Dict[str, Any]:
     """
     API-ready function to extract all subtables from all remaining sheets (except main sheet)
 
@@ -59,9 +59,15 @@ def extract_all_subtables_api(excel_file_path: str) -> Dict[str, Any]:
                 "reference_patterns": {}
             }
 
-        # Skip the main sheet (first sheet) and process remaining sheets
-        main_sheet = all_sheet_names[0]
-        remaining_sheets = all_sheet_names[1:]
+        # Determine the main sheet to skip: prefer exact name match when provided
+        if main_sheet_name and main_sheet_name in all_sheet_names:
+            main_sheet = main_sheet_name
+        else:
+            # Fallback to the first sheet if provided name not found
+            main_sheet = all_sheet_names[0]
+
+        # Process all sheets except the main sheet (skip by name, not index)
+        remaining_sheets = [s for s in all_sheet_names if s != main_sheet]
         # Robustness: de-duplicate while keeping order
         seen = set()
         deduped_remaining = []
@@ -73,7 +79,8 @@ def extract_all_subtables_api(excel_file_path: str) -> Dict[str, Any]:
 
         logger.info(f"Processing Excel file: {excel_file_path}")
         logger.info(f"Main sheet (skipped): {main_sheet}")
-        logger.info(f"Remaining sheets to process: {remaining_sheets}")
+        logger.info(
+            f"Remaining sheets to process (excluding main '{main_sheet}'): {remaining_sheets}")
 
         # Initialize results
         all_sheets_results = []

@@ -69,6 +69,8 @@ class HierarchicalExcelExtractor:
             "数量・金額増減": ["数量・金額増減", "増減", "変更"],
             "摘要": ["摘要", "備考", "摘　要"]
         }
+        # Nousei-only mode flag
+        self._nousei_mode: bool = False
 
     def normalize_text(self, text: str) -> str:
         """Normalize text by removing spaces and converting full-width characters to half-width"""
@@ -105,6 +107,10 @@ class HierarchicalExcelExtractor:
     def extract_hierarchical_data(self, file_path: str, sheet_name: str) -> List[HierarchicalItem]:
         """Extract hierarchical data from Excel sheet with row spanning logic"""
         logger.info(f"Extracting hierarchical data from sheet: {sheet_name}")
+
+        # Enable nousei mode for the specified main sheet name
+        prev_mode = self._nousei_mode
+        self._nousei_mode = (sheet_name == "52標準 15行本工事内訳書")
 
         # Read Excel file
         df = pd.read_excel(file_path, sheet_name=sheet_name)
@@ -394,16 +400,28 @@ class HierarchicalExcelExtractor:
         return None
 
     def _is_table_number_row(self, row: pd.Series) -> bool:
-        """Check if a row contains just a table number"""
+        """Check if a row contains just a table number (tolerant patterns).
+        Accepts rows like: ' 1 ', '-1-', '- 1 -', '表1', '1表', 'No.1', '1.' etc.
+        We trim everything except digits and dots, then verify it reduces to a number.
+        """
         non_empty_values = [str(val).strip()
                             for val in row if pd.notna(val) and str(val).strip()]
+        # Primary stable rule
         if len(non_empty_values) == 1:
             value = non_empty_values[0]
-            try:
-                float(value)
+            cleaned = re.sub(r"[\s\u3000\-–—_表No\.:]+", "",
+                             value, flags=re.IGNORECASE)
+            if re.match(r"^\d+(?:\.0+)?$", cleaned):
                 return True
-            except ValueError:
-                pass
+            only_digits = re.sub(r"[^0-9]", "", value)
+            return bool(only_digits)
+
+        # Nousei-only fallback: allow up to 2 non-empty cells that together form a table label
+        if getattr(self, '_nousei_mode', False) and 1 < len(non_empty_values) <= 2:
+            joined = "".join(non_empty_values)
+            j = re.sub(r"[\s\u3000]+", "", joined)
+            if re.match(r"^第\d+表$", j) or re.match(r"^表\d+$", j) or re.match(r"^No\.?\d+$", j, flags=re.IGNORECASE) or re.match(r"^\-?\d+\-?$", j):
+                return True
         return False
 
     def _find_column_positions(self, df: pd.DataFrame, header_row_idx: int) -> Dict[str, int]:
@@ -1043,9 +1061,13 @@ class HierarchicalExcelExtractor:
         return ippankan_amount + genka_amount
 
     def _calculate_koji_kei_amount(self, hierarchical_items: List[HierarchicalItem]) -> float:
-        """Calculate 工事費計 amount: 消費税額及び地方消費税額 + 工事価格 amount"""
+        """Calculate 工事費計 amount.
+        Preferred rule: 工事費計 = 工事価格 + 消費税額及び地方消費税額 (level 0).
+        Fallback rule (when the above tax item is absent): 工事費計 = 工事価格 + 消費税相当額 (level 0).
+        """
         kakaku_amount = 0.0
         tax_amount = 0.0
+        found_tax = False
 
         # Find 工事価格 amount
         for item in hierarchical_items:
@@ -1057,15 +1079,28 @@ class HierarchicalExcelExtractor:
                     pass
                 break
 
-        # Find 消費税額及び地方消費税額 amount
+        # Find 消費税額及び地方消費税額 (prefer level 0)
         for item in hierarchical_items:
-            if item.item_name == "消費税額及び地方消費税額":
+            if item.item_name == "消費税額及び地方消費税額" and getattr(item, 'level', 0) == 0:
                 try:
                     tax_amount = float(item.amount.replace(
                         ',', '')) if item.amount else 0.0
                 except (ValueError, AttributeError):
-                    pass
+                    tax_amount = 0.0
+                found_tax = True
                 break
+
+        # Fallback: 消費税相当額 at level 0 when the above was not found
+        if not found_tax:
+            for item in hierarchical_items:
+                if item.item_name == "消費税相当額" and getattr(item, 'level', 0) == 0:
+                    try:
+                        tax_amount = float(item.amount.replace(
+                            ',', '')) if item.amount else 0.0
+                    except (ValueError, AttributeError):
+                        tax_amount = 0.0
+                    found_tax = True
+                    break
 
         return tax_amount + kakaku_amount
 
@@ -1435,17 +1470,55 @@ def verify_excel_file(file_path: str, sheet_name: str) -> VerificationResult:
         all_mismatches = recursive_results['mismatches'] + \
             business_logic_mismatches
 
-        # Normalize: include table identifiers and drop 'path' for output
+        # Normalize: include table identifiers and drop 'path' for output.
+        # Nousei-only enhancement: if a level-0 mismatch lacks table_number/reference_number,
+        # propagate from the first child that has one (keeps calc logic untouched).
         normalized_mismatches = []
         for m in all_mismatches:
+            table_num = m.get('table_number')
+            ref_num = m.get('reference_number')
+            if not table_num and not ref_num:
+                # Find the matching node in the hierarchy by name+level
+                target_name = m.get('item_name')
+                target_level = m.get('level')
+                try:
+                    # Search all nodes (roots and descendants)
+                    def find_nodes(items):
+                        for it in items:
+                            if it.get('item_name') == target_name and it.get('level') == target_level:
+                                yield it
+                            for child in it.get('children', []):
+                                yield from find_nodes([child])
+
+                    matched = None
+                    for root in json_data:
+                        for node in find_nodes([root]):
+                            matched = node
+                            break
+                        if matched:
+                            break
+                    if matched:
+                        # BFS downwards to find first descendant with table/reference info
+                        queue = list(matched.get('children', []))
+                        while queue:
+                            node = queue.pop(0)
+                            tnum = node.get('table_number')
+                            rnum = node.get('reference_number')
+                            if tnum or rnum:
+                                table_num = tnum or table_num
+                                ref_num = rnum or ref_num
+                                break
+                            queue.extend(node.get('children', []))
+                except Exception:
+                    pass
             normalized_mismatches.append({
                 'item_name': m.get('item_name'),
                 'level': m.get('level'),
                 'amount': m.get('amount'),
                 'children_sum': m.get('children_sum'),
                 'difference': m.get('difference'),
-                'table_number': m.get('table_number'),
-                'reference_number': m.get('reference_number'),
+                'table_number': table_num,
+                'reference_number': ref_num,
                 'is_main_table': m.get('is_main_table')
             })
 

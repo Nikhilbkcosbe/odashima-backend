@@ -157,6 +157,16 @@ def check_adjacent_unit_quantity_unit_pattern(pdf_unit_quantity: str, pdf_unit: 
     normalized_pdf_unit = normalize_text(pdf_unit)
     normalized_excel_title = normalize_text(excel_title)
 
+    # Normalize equivalent units: m^2 ↔ m2, m^3 ↔ m3, including full-width variants
+    def norm_unit(u: str) -> str:
+        u = u.replace('ｍ', 'm').replace('㎡', 'm2').replace('㎥', 'm3')
+        u = u.replace('m^2', 'm2').replace('m²', 'm2').replace(
+            'm^3', 'm3').replace('m³', 'm3')
+        return u
+
+    normalized_pdf_unit = norm_unit(normalized_pdf_unit)
+    normalized_excel_title = norm_unit(normalized_excel_title)
+
     # Simple substring per requirement
     adjacent_pattern = normalized_pdf_qty + normalized_pdf_unit
     if adjacent_pattern in normalized_excel_title:
@@ -295,11 +305,23 @@ def compare_subtable_titles(pdf_subtable, excel_subtable) -> Dict:
         excel_ref = excel_subtable.get("reference_number", "")
         excel_title = excel_subtable.get("table_title", "")
 
+    # Try to get PDF page number early
+    pdf_page_number = None
+    try:
+        if hasattr(pdf_subtable, 'page_number'):
+            pdf_page_number = getattr(pdf_subtable, 'page_number', None)
+        elif isinstance(pdf_subtable, dict):
+            pdf_page_number = pdf_subtable.get('page_number', None)
+    except Exception:
+        pdf_page_number = None
+
     result = {
         "pdf_reference": pdf_ref,
         "excel_reference": excel_ref,
         "pdf_title": pdf_title,
         "excel_title": excel_title,
+        "pdf_page_number": pdf_page_number,
+        "pdf_item_name": (pdf_title.get('item_name', '') if isinstance(pdf_title, dict) else ''),
         "unit_match": False,
         "unit_quantity_match": False,
         "overall_match": False,
@@ -471,7 +493,97 @@ def compare_all_subtable_titles(pdf_path: str, excel_path: str, pdf_start_page: 
         raise
 
 
-def compare_all_subtable_titles_from_cached_data(pdf_subtables: List, excel_subtables: List) -> Dict:
+def _get_page_number(obj) -> Optional[int]:
+    try:
+        if hasattr(obj, 'page_number'):
+            return getattr(obj, 'page_number', None)
+        if isinstance(obj, dict):
+            return obj.get('page_number')
+    except Exception:
+        return None
+    return None
+
+
+def _get_raw_fields(obj) -> Dict:
+    try:
+        if hasattr(obj, 'raw_fields'):
+            return getattr(obj, 'raw_fields', {}) or {}
+        if isinstance(obj, dict):
+            return obj.get('raw_fields', {}) or {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _get_reference_number(obj) -> str:
+    try:
+        if hasattr(obj, 'reference_number'):
+            return getattr(obj, 'reference_number', '') or ''
+        if isinstance(obj, dict):
+            return obj.get('reference_number', '') or ''
+    except Exception:
+        return ''
+    return ''
+
+
+def _normalize_qty_text(q: str) -> str:
+    if not q:
+        return ''
+    # Normalize punctuation and remove grouping commas
+    q = str(q).replace('，', ',')
+    q_no_commas = q.replace(',', '')
+    # Trim trailing zeros but preserve significant decimals
+    if '.' in q_no_commas:
+        q_no_commas = re.sub(r'(\.\d*?)0+$', r'\1', q_no_commas)
+        q_no_commas = re.sub(r'\.$', '', q_no_commas)
+    # If ends with .00 style, becomes integer (e.g., 1.00 -> 1)
+    m = re.match(r'^(\d+)\.(0+)$', q_no_commas)
+    if m:
+        return m.group(1)
+    return q_no_commas
+
+
+def _build_nousei_pdf_title_for_ref(ref: str, ref_page: Optional[int], pdf_items: List) -> Optional[Dict]:
+    """Build a PDF title for Nousei by scanning triple-dot main rows in order and mapping sequentially to 内N号 across pages.
+    Uses metadata fields from the stable extractor: '_is_triple_dot' (marker) and '備考' (remarks with 算出数量).
+    """
+    if not pdf_items:
+        return None
+    triple_titles = []
+    for itm in pdf_items:
+        raw = _get_raw_fields(itm)
+        if not raw:
+            continue
+        # Require triple-dot marker flag from extraction metadata
+        if not raw.get('_is_triple_dot'):
+            continue
+        name = (raw.get('工種・種目') or raw.get('工事区分・工種・種別・細別') or '').strip()
+        remarks = raw.get('備考') or raw.get('摘要') or ''
+        unit = ''
+        qty = ''
+        if remarks:
+            m = re.search(
+                r"算\s*出\s*数\s*量\s*[:：]?\s*([\d,，\.]+)\s*([^\s]+)", str(remarks))
+            if not m:
+                r_norm = re.sub(r"[\s\u3000]+", "", str(remarks))
+                m = re.search(r"算出数量[:：]?([\d,，\.]+)([^\s]+)", r_norm)
+            if m:
+                qty = _normalize_qty_text((m.group(1) or '').replace('，', ','))
+                unit = (m.group(2) or '').strip()
+        triple_titles.append(
+            {'item_name': name, 'unit': unit, 'unit_quantity': qty})
+    if not triple_titles:
+        return None
+    mref = re.match(r'^内(\d+)号$', ref or '')
+    if not mref:
+        return None
+    idx = int(mref.group(1)) - 1
+    if 0 <= idx < len(triple_titles):
+        return triple_titles[idx]
+    return None
+
+
+def compare_all_subtable_titles_from_cached_data(pdf_subtables: List, excel_subtables: List, pdf_items: Optional[List] = None) -> Dict:
     """
     Compare all PDF subtable titles with Excel subtable titles using cached data.
 
@@ -509,12 +621,45 @@ def compare_all_subtable_titles_from_cached_data(pdf_subtables: List, excel_subt
         pdf_by_ref = {}
         excel_by_ref = {}
 
+        # Group all PDF subtables by reference and track first page for each ref
+        ref_to_subs = {}
+        ref_to_first_page = {}
         for subtable in pdf_subtables:
-            if hasattr(subtable, 'reference_number'):
-                pdf_by_ref[kitakami_key(subtable.reference_number)] = subtable
-            elif isinstance(subtable, dict) and subtable.get("reference_number"):
-                pdf_by_ref[kitakami_key(
-                    subtable["reference_number"])] = subtable
+            ref = _get_reference_number(subtable)
+            if not ref:
+                continue
+            key = kitakami_key(ref)
+            ref_to_subs.setdefault(key, []).append(subtable)
+            pnum = _get_page_number(subtable)
+            if pnum is not None:
+                if key not in ref_to_first_page or pnum < ref_to_first_page[key]:
+                    ref_to_first_page[key] = pnum
+        # For Nousei refs (内\d+号), build titles from main items
+        for key, subs in ref_to_subs.items():
+            # Determine original ref string for result fields
+            orig_ref = _get_reference_number(subs[0])
+            # Fill by default with the first subtable object
+            base = subs[0]
+            # Identify Nousei refs by pattern
+            if re.match(r'^内\d+号$', orig_ref or '') and pdf_items:
+                ref_page = ref_to_first_page.get(key)
+                title = _build_nousei_pdf_title_for_ref(
+                    orig_ref, ref_page, pdf_items)
+                # Create an augmented dict with computed title and page number (marker page)
+                augmented = dict(base) if isinstance(base, dict) else {
+                    'reference_number': orig_ref,
+                    'page_number': _get_page_number(base),
+                    'table_title': None
+                }
+                if title:
+                    augmented['table_title'] = title
+                # Prefer the marker page if known
+                if ref_page is not None:
+                    augmented['page_number'] = ref_page
+                pdf_by_ref[key] = augmented
+            else:
+                # Non-Nousei: keep as-is
+                pdf_by_ref[key] = base
 
         for subtable in excel_subtables:
             if hasattr(subtable, 'reference_number'):

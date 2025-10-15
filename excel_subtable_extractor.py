@@ -47,7 +47,8 @@ def find_reference_number_pattern(text: str) -> bool:
     if not text:
         return False
     normalized = normalize_text(text)
-    pattern = r'[\u4e00-\u9faf]+\d+号'
+    # Accept Kanji + optional hyphen + digits + 号 (e.g., 内1号, 内-1号)
+    pattern = r'[\u4e00-\u9faf]+-?\d+号'
     return bool(re.search(pattern, normalized))
 
 
@@ -59,7 +60,8 @@ def find_reference_number_standalone(text: str) -> bool:
     if not text:
         return False
     normalized = normalize_text(text)
-    pattern = r'^[\u4e00-\u9faf]+\d+号$'
+    # Standalone: entire cell is exactly Kanji + optional hyphen + digits + 号
+    pattern = r'^[\u4e00-\u9faf]+-?\d+号$'
     return bool(re.match(pattern, normalized))
 
 
@@ -304,7 +306,10 @@ def extract_subtables_from_excel_sheet(excel_file_path: str, sheet_name: str) ->
                 # Only look for reference numbers in typical header positions (columns 0-3)
                 # For Kitakami requirement: references must be standalone cell values
                 if col_idx <= 3 and find_reference_number_standalone(str(cell_value)):
-                    reference_number = str(cell_value).strip()
+                    # Normalize: accept hyphenated form for detection, but store without hyphen (e.g., 内-3号 -> 内3号)
+                    raw_ref = str(cell_value).strip()
+                    reference_number = raw_ref.replace(
+                        '-', '').replace('－', '')
                     print(
                         f"DEBUG: Found reference number '{reference_number}' at row {current_row}, col {col_idx}")
                     logger.info(
