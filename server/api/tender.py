@@ -623,10 +623,35 @@ async def compare_cached_extra_items(session_id: str = Form(...)):
         extra_main_items = matcher.get_extra_items_only_simplified(
             pdf_items, excel_items)
 
-        # Main table comparison (index-based) to detect MISSING with context
+        # Main table comparison for mismatches and name mismatches
         main_summary = matcher.compare_items(pdf_items, excel_items)
-        missing_main_results = [
-            r for r in main_summary.results if r.status == 'MISSING' and r.type == 'Main Table']
+
+        # Main table missing detection (area-specific policy)
+        project_area = (cached_data.get('extraction_params')
+                        or {}).get('project_area', '岩手')
+        if project_area == '農政':
+            # 農政: 順序に依存せず、メインテーブルの名称存在有無のみで欠落検知
+            main_missing_items = matcher.get_missing_items_by_name_only_strict(
+                pdf_items, excel_items)
+            # Convert to ComparisonResult-like objects for downstream formatting
+            # local import to avoid circulars at module import time
+            from ..schemas.tender import ComparisonResult
+            missing_main_results = [
+                ComparisonResult(
+                    status="MISSING",
+                    pdf_item=item,
+                    excel_item=None,
+                    match_confidence=0.0,
+                    quantity_difference=None,
+                    unit_mismatch=None,
+                    type="Main Table"
+                )
+                for item in main_missing_items
+            ]
+        else:
+            # 岩手など: 既存のインデックスベース比較でMISSING判定
+            missing_main_results = [
+                r for r in main_summary.results if r.status == 'MISSING' and r.type == 'Main Table']
 
         # Subtable extra items (Excel subtables not in PDF)
         extra_subtable_items = matcher.get_extra_subtable_items_only(
